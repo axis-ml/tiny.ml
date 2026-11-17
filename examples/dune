@@ -1,0 +1,7 @@
+; Tracer examples. Run them with `dune exec tiny_ml -- [NAME ...]`.
+
+(library
+ (name tiny_ml_examples)
+ (libraries tiny_ml.tracer)
+ (preprocess
+  (pps tiny_ml.ppx_tracer)))

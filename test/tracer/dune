@@ -1,0 +1,55 @@
+; Tests with a .expected file are snapshots: after an intended change, run
+; `dune test`, check the diff, then `dune promote`.
+
+(tests
+ (names
+  test_ndarray
+  test_jvp
+  test_extend
+  test_vjp
+  test_compile
+  test_ir
+  test_control
+  test_concrete
+  test_ad
+  test_ppx
+  test_examples)
+ (libraries tiny_ml.tracer tiny_ml_examples)
+ (preprocess
+  (per_module
+   ((pps tiny_ml.ppx_tracer)
+    test_ppx))))
+
+; The same tests with Tracer.Private.debug on: rule results and graphs are
+; checked as they are made, and must not change any output.
+
+(rule
+ (alias runtest)
+ (action
+  (setenv
+   TINY_ML_DEBUG
+   1
+   (progn
+    (run %{exe:test_ndarray.exe})
+    (run %{exe:test_jvp.exe})
+    (run %{exe:test_extend.exe})
+    (run %{exe:test_vjp.exe})
+    (run %{exe:test_compile.exe})
+    (run %{exe:test_ir.exe})
+    (run %{exe:test_control.exe})
+    (run %{exe:test_concrete.exe})
+    (run %{exe:test_ad.exe})
+    (run %{exe:test_ppx.exe})))))
+
+(rule
+ (with-stdout-to
+  test_examples.debug.output
+  (setenv
+   TINY_ML_DEBUG
+   1
+   (run %{exe:test_examples.exe}))))
+
+(rule
+ (alias runtest)
+ (action
+  (diff test_examples.expected test_examples.debug.output)))

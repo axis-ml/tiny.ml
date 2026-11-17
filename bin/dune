@@ -1,0 +1,4 @@
+(executable
+ (public_name tiny_ml)
+ (name main)
+ (libraries tiny_ml_examples))

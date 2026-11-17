@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "LICENSE"]
+  pull_request:
+    paths-ignore: ["**.md", "LICENSE"]
+
+# A new push to the same branch or PR cancels the run still going.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Caches the bare compiler switch in ./_opam and dune's build cache.
+      - uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: "5.4"
+
+      # setup-ocaml's cache holds only the compiler; restoring the full switch
+      # on top of it also keeps the deps and ocamlformat (~3 min to build).
+      - uses: actions/cache@v4
+        with:
+          path: _opam
+          key: opam-${{ runner.os }}-${{ hashFiles('*.opam', '.github/workflows/ci.yml') }}
+
+      - run: opam install . --deps-only --with-test
+
+      # Same switch as the build, so the format check shares its cache
+      # instead of building a second compiler.
+      - if: runner.os == 'Linux'
+        run: opam install ocamlformat.0.29.0
+
+      - if: runner.os == 'Linux'
+        run: opam exec -- dune build @fmt
+
+      - run: opam exec -- dune build
+
+      - run: opam exec -- dune test

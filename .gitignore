@@ -1,0 +1,11 @@
+_build/
+_opam/
+*.install
+.merlin
+.DS_Store
+.claude/
+
+__pycache__/
+*.pyc
+.venv/
+.uv/

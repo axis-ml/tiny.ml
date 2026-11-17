@@ -1,0 +1,11 @@
+; Syntax for user code of the tracer, optional: [@@deriving tree] and
+; [%tree: ...] build Tree descriptions; [%ops ...] and [let%ops] turn
+; OCaml's float syntax into Ops. Use with (preprocess (pps tiny_ml.ppx_tracer)).
+
+(library
+ (name ppx_tracer)
+ (public_name tiny_ml.ppx_tracer)
+ (kind ppx_deriver)
+ (libraries ppxlib)
+ (preprocess
+  (pps ppxlib.metaquot)))
