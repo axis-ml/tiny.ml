@@ -10,34 +10,34 @@ let staged_leaky x =
 
 let graphs () =
   title "the graph of f, for a scalar";
-  show_graph (Ir.make f (Ops.scalar 0.));
+  Ir.make f (Ops.scalar 0.) |> show_graph;
   title "the graph of grad f: derivatives are ops too";
-  show_graph (Ir.make (Ad.grad f) (Ops.scalar 0.))
+  Ir.make (Ad.grad f) (Ops.scalar 0.) |> show_graph
 ;;
 
 let jit () =
   title "jit: traced on the first call for each input type";
   let fast = Compile.compile ~backend:noisy_jit f in
-  print "fast 1" (fast (Ops.scalar 1.));
-  print "fast 2 (cached)" (fast (Ops.scalar 2.));
-  print "fast [1 2] (new shape)" (fast (Ops.array [| 1.; 2. |]));
-  print "deriv fast 1" (Ad.deriv fast (Ops.scalar 1.));
+  Ops.scalar 1. |> fast |> print "fast 1";
+  Ops.scalar 2. |> fast |> print "fast 2 (cached)";
+  Ops.array [| 1.; 2. |] |> fast |> print "fast [1 2] (new shape)";
+  Ops.scalar 1. |> Ad.deriv fast |> print "deriv fast 1";
   title "under a transformation, a jitted function stays one call";
-  show_graph (Ir.make (Ad.grad fast) (Ops.scalar 0.))
+  Ir.make (Ad.grad fast) (Ops.scalar 0.) |> show_graph
 ;;
 
 let branching () =
   title "while tracing there is no data to branch on";
-  print "leaky 2, eager" (leaky (Ops.scalar 2.));
+  Ops.scalar 2. |> leaky |> print "leaky 2, eager";
   (match catch (fun () -> Ir.make leaky (Ops.scalar 2.)) with
    | Ok _ -> ()
    | Error (Concretization_error msg) -> Printf.printf "  Ir.make leaky: %s\n" msg
-   | Error e -> failwith (error_to_string e));
+   | Error e -> failwith @@ error_to_string e);
   title "Control.cond traces both branches, so it stages";
-  show_graph (Ir.make staged_leaky (Ops.scalar 2.));
+  Ir.make staged_leaky (Ops.scalar 2.) |> show_graph;
   let fast = Compile.compile ~backend:Compile.jit staged_leaky in
-  print "fast leaky -3" (fast (Ops.scalar (-3.)));
-  print "grad fast leaky -3" (Ad.grad fast (Ops.scalar (-3.)))
+  Ops.scalar (-3.) |> fast |> print "fast leaky -3";
+  Ops.scalar (-3.) |> Ad.grad fast |> print "grad fast leaky -3"
 ;;
 
 let run () =

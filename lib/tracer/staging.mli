@@ -6,7 +6,7 @@ open Lang
 
     {[
       let g = Ir.make (fun x -> Ops.(sin x * x)) (Ops.scalar 1.) in
-      print_endline (Ir.to_string g)
+      Ir.to_string g |> print_endline
     ]} *)
 module Ir : sig
   type value := Interp.value

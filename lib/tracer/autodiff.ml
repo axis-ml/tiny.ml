@@ -102,19 +102,20 @@ module Jvp = struct
   ;;
 
   let process self prim args =
-    let primals, tangents = List.split (List.map (unpack self) args) in
+    let primals, tangents = args |> List.map (unpack self) |> List.split in
     if List.for_all Z.is_zero tangents
     then bind prim primals
     else (
-      let outs, touts = (Prim.Table.find rules prim) prim primals tangents in
+      let rule = Prim.Table.find rules prim in
+      let outs, touts = rule prim primals tangents in
       check_rule prim outs touts;
       List.map2 (pack self) outs touts)
   ;;
 
   let jvp_flat f primals tangents =
     let self = create ~name:"jvp" ~concrete:(fun d -> Some d.primal) process in
-    let outs, aux = handle self (fun () -> f (List.map2 (pack self) primals tangents)) in
-    let ys, dys = List.split (List.map (unpack self) outs) in
+    let outs, aux = handle self (fun () -> List.map2 (pack self) primals tangents |> f) in
+    let ys, dys = outs |> List.map (unpack self) |> List.split in
     ys, dys, aux
   ;;
 end
@@ -190,7 +191,7 @@ module Partial_eval = struct
       | None -> Known v
     in
     let stage self prim args =
-      let outputs = List.map fresh (Prim.abstract_eval prim (List.map aval args)) in
+      let outputs = args |> List.map aval |> Prim.abstract_eval prim |> List.map fresh in
       Tape.record eqns { prim; inputs = List.map (atom self) args; outputs };
       List.map (fun x -> tracer self x.aval x) outputs
     in
@@ -211,7 +212,7 @@ module Partial_eval = struct
         tracer self a x, Some x
     in
     let ins = List.map input operands in
-    let outs, aux = handle self (fun () -> f (List.map fst ins)) in
+    let outs, aux = handle self (fun () -> List.map fst ins |> f) in
     let g =
       { inputs = List.filter_map snd ins
       ; eqns = Tape.to_list eqns
@@ -282,19 +283,18 @@ module Transpose = struct
     if List.for_all Z.is_zero couts
     then cts
     else (
-      let cin =
-        (Prim.Table.find rules e.prim) e.prim (List.map operand_of e.inputs) couts
-      in
+      let rule = Prim.Table.find rules e.prim in
+      let cin = rule e.prim (List.map operand_of e.inputs) couts in
       check_rule e cin;
       List.fold_left2 accumulate cts e.inputs cin)
   ;;
 
   let transpose g cts =
     let seeded =
-      List.fold_left2 accumulate Env.empty g.outputs (List.map Z.nonzero cts)
+      List.map Z.nonzero cts |> List.fold_left2 accumulate Env.empty g.outputs
     in
-    let cts = List.fold_left backprop seeded (List.rev g.eqns) in
-    List.map (fun x -> Z.instantiate (cotangent cts x)) g.inputs
+    let cts = List.rev g.eqns |> List.fold_left backprop seeded in
+    List.map (fun x -> cotangent cts x |> Z.instantiate) g.inputs
   ;;
 end
 
@@ -307,11 +307,8 @@ module Vjp = struct
       let ys, dys, aux = Jvp.jvp_flat f xs (List.map Z.nonzero dxs) in
       List.map Z.instantiate dys, (ys, aux)
     in
-    let lin, (ys, aux) =
-      Partial_eval.trace
-        jvp_on_unknown_tangents
-        (List.map (fun x -> Linear.Linear (aval x)) xs)
-    in
+    let operands = List.map (fun x -> Linear.Linear (aval x)) xs in
+    let lin, (ys, aux) = Partial_eval.trace jvp_on_unknown_tangents operands in
     if not (List.for_all alive ys)
     then
       Error.type_error
@@ -363,12 +360,9 @@ module Derivatives = struct
       | Some d, Z.Nonzero dx -> Some (d dx)
       | None, _ | _, Z.Zero _ -> None
     in
+    let ds = partials_of p partials xs y in
     let t =
-      List.fold_left2
-        (fun acc d dx -> add_term y acc (term d dx))
-        (Z.zero_like y)
-        (partials_of p partials xs y)
-        dxs
+      List.fold_left2 (fun acc d dx -> add_term y acc (term d dx)) (Z.zero_like y) ds dxs
     in
     [ y ], [ t ]
   ;;
@@ -396,11 +390,9 @@ module Derivatives = struct
         in
         Some (bind1 p args))
     in
+    let groups = groups (List.length dxs) in
     let t =
-      List.fold_left
-        (fun acc group -> add_term y acc (term group))
-        (Z.zero_like y)
-        (groups (List.length dxs))
+      List.fold_left (fun acc group -> add_term y acc (term group)) (Z.zero_like y) groups
     in
     [ y ], [ t ]
   ;;
@@ -422,7 +414,7 @@ module Derivatives = struct
   ;;
 
   let register_multilinear p ~transpose =
-    register_groups p (fun n -> List.map (fun i -> [ i ]) (Lists.range n)) transpose
+    register_groups p (fun n -> Lists.range n |> List.map (fun i -> [ i ])) transpose
   ;;
 
   open Ops
@@ -472,27 +464,25 @@ module Derivatives = struct
   ;;
 
   let elementwise_rules () =
-    binary B.Div (fun _ y z ->
-      [ Some (fun t -> div t y); Some (fun t -> neg (div (mul t z) y)) ]);
+    (* [open Ops] brings [Ops.Infix] into scope: [t * y] is [mul t y]. *)
+    binary B.Div (fun _ y z -> [ Some (fun t -> t / y); Some (fun t -> -(t * z / y)) ]);
     binary B.Max (fun x y _ ->
-      let wx () = add (greater x y) (mul (scalar 0.5) (equal x y)) in
-      [ Some (fun t -> mul (wx ()) t); Some (fun t -> mul (sub (scalar 1.) (wx ())) t) ]);
+      let wx () = (x > y) + (scalar 0.5 * equal x y) in
+      [ Some (fun t -> wx () * t); Some (fun t -> (scalar 1. - wx ()) * t) ]);
     binary B.Greater (fun _ _ _ -> [ None; None ]);
     binary B.Less (fun _ _ _ -> [ None; None ]);
-    unary B.Sin (fun x _ -> Some (fun t -> mul t (cos x)));
-    unary B.Cos (fun x _ -> Some (fun t -> neg (mul t (sin x))));
-    unary B.Exp (fun _ y -> Some (fun t -> mul t y));
-    unary B.Log (fun x _ -> Some (fun t -> div t x));
-    unary B.Sqrt (fun _ y -> Some (fun t -> div t (mul (scalar 2.) y)));
+    unary B.Sin (fun x _ -> Some (fun t -> t * cos x));
+    unary B.Cos (fun x _ -> Some (fun t -> -(t * sin x)));
+    unary B.Exp (fun _ y -> Some (fun t -> t * y));
+    unary B.Log (fun x _ -> Some (fun t -> t / x));
+    unary B.Sqrt (fun _ y -> Some (fun t -> t / (scalar 2. * y)));
     register_elementwise (B.Integer_pow 0) ~partials:(fun p xs _ ->
       with1 p xs (fun x ->
         match p with
         | B.Integer_pow 0 -> [ None ]
         | B.Integer_pow n ->
-          [ Some
-              (fun t ->
-                mul t (mul (scalar (float n)) (integer_pow ~exponent:(Int.pred n) x)))
-          ]
+          let power = integer_pow ~exponent:(Int.pred n) in
+          [ Some (fun t -> t * (scalar (float n) * power x)) ]
         | _ -> Prim.arity_error p ~expected:1 xs))
   ;;
 
@@ -518,7 +508,7 @@ module Derivatives = struct
         let stop = Int.add start (operand_aval x).shape.(axis) in
         stop, nz (slice ~axis ~start ~stop c)
       in
-      snd (List.fold_left_map piece 0 operands)
+      List.fold_left_map piece 0 operands |> snd
     | _ -> bad p
   ;;
 
@@ -578,7 +568,7 @@ module Derivatives = struct
         let y = bind1 p [ x ] in
         let mean_at_max dx =
           let at_max = equal x (broadcast ~shape:(shape x) ~axes y) in
-          div (reduce_sum ~axes (mul at_max dx)) (reduce_sum ~axes at_max)
+          reduce_sum ~axes (at_max * dx) / reduce_sum ~axes at_max
         in
         [ y ], [ Z.map ~like:y mean_at_max dx ]
       | _ -> Prim.arity_error p ~expected:1 xs)
@@ -622,28 +612,26 @@ module Ad = struct
     if not (Tree.equal_structure ds s)
     then Error.type_error "jvp: tangents have another structure than primals";
     check_leaves ~fn:"jvp" ~what:"tangent" xs dxs;
-    let ys, dys, out =
-      Jvp.jvp_flat (flat_fn in_tree out_tree f s) xs (List.map Z.nonzero dxs)
-    in
+    let flat_f = flat_fn in_tree out_tree f s in
+    let ys, dys, out = Jvp.jvp_flat flat_f xs (List.map Z.nonzero dxs) in
     let rebuild = Tree.unflatten out_tree out in
-    rebuild ys, rebuild (List.map Z.instantiate dys)
+    rebuild ys, List.map Z.instantiate dys |> rebuild
   ;;
 
   let jvp f x dx = jvp_tree ~input:Tree.value ~output:Tree.value f x dx
-  let deriv f x = snd (jvp f x (Ops.ones_like x))
+  let deriv f x = jvp f x (Ops.ones_like x) |> snd
 
   let basis x i =
-    Ops.array
-      ~shape:(Ops.shape x)
-      (Array.init (Ops.size x) (fun j -> if i = j then 1. else 0.))
+    Array.init (Ops.size x) (fun j -> if i = j then 1. else 0.)
+    |> Ops.array ~shape:(Ops.shape x)
   ;;
 
   let jacobian ~axis ~out x rows =
-    Ops.reshape ~shape:(Array.append out (Ops.shape x)) (Ops.stack ~axis rows)
+    Ops.stack ~axis rows |> Ops.reshape ~shape:(Array.append out (Ops.shape x))
   ;;
 
   let jacfwd f x =
-    let cols = List.init (Ops.size x) (fun i -> snd (jvp f x (basis x i))) in
+    let cols = List.init (Ops.size x) (fun i -> jvp f x (basis x i) |> snd) in
     jacobian ~axis:(-1) ~out:(Ops.shape (List.hd cols)) x cols
   ;;
 
@@ -655,7 +643,7 @@ module Ad = struct
       if not (Tree.equal_structure cs out)
       then Error.type_error "vjp: cotangents have another structure than outputs";
       check_leaves ~fn:"vjp" ~what:"cotangent" ys cts;
-      Tree.unflatten in_tree s (back cts)
+      back cts |> Tree.unflatten in_tree s
     in
     Tree.unflatten out_tree out ys, back
   ;;
@@ -670,7 +658,7 @@ module Ad = struct
   ;;
 
   let value_and_grad f x = value_and_grad_tree ~wrt:Tree.value f x
-  let grad_tree ~wrt f x = snd (value_and_grad_tree ~wrt f x)
+  let grad_tree ~wrt f x = value_and_grad_tree ~wrt f x |> snd
   let grad f x = grad_tree ~wrt:Tree.value f x
 
   let jacrev f x =

@@ -18,7 +18,7 @@ let () =
     "grad run1 = grad f"
     ~expected:(Ad.grad f (s 5.))
     (Ad.grad (Ir.run1 g) (s 5.));
-  Check.bool "retrace run1" (prim_names (Ir.make (Ir.run1 g) (s 0.)) = prim_names g)
+  Check.bool "retrace run1" (Ir.make (Ir.run1 g) (s 0.) |> prim_names = prim_names g)
 ;;
 
 let () =
@@ -30,18 +30,21 @@ let () =
   Check.bool
     "matrix-vector dot is a Dot between reshapes"
     (prim_names gv = [ "reshape"; "dot"; "reshape" ]);
-  let loss x = Ops.(reduce_sum (sin (dot x w))) in
+  let loss x = Ops.(dot x w |> sin |> reduce_sum) in
   let fast = Compile.compile ~backend:Compile.jit loss in
   Check.value "jit dot" ~expected:(loss x) (fast x);
   Check.value "grad of jit dot" ~expected:(Ad.grad loss x) (Ad.grad fast x);
   let dx = Check.rand ~lo:(-1.) ~hi:1. [| 2; 3 |] in
-  Check.value "jvp of jit dot" ~expected:(snd (Ad.jvp loss x dx)) (snd (Ad.jvp fast x dx));
+  Check.value
+    "jvp of jit dot"
+    ~expected:(Ad.jvp loss x dx |> snd)
+    (Ad.jvp fast x dx |> snd);
   let jit_grad = Compile.compile ~backend:Compile.jit (Ad.grad loss) in
   Check.value "jit of grad dot" ~expected:(Ad.grad loss x) (jit_grad x);
   let gg = Ir.make (Ad.grad loss) x in
   Check.bool
     "grad of dot: one Dot forward, one back, none for the constant"
-    (List.length (List.filter (String.equal "dot") (prim_names gg)) = 2)
+    (prim_names gg |> List.filter (String.equal "dot") |> List.length = 2)
 ;;
 
 let () =
@@ -62,7 +65,7 @@ let () =
 ;;
 
 let () =
-  let layer (x, w) = Ops.(reduce_sum (relu (matmul x w))) in
+  let layer (x, w) = Ops.(matmul x w |> relu |> reduce_sum) in
   let x = Ops.ones [| 2; 3 |]
   and w = Ops.full [| 3; 4 |] 0.5 in
   let g = Ir.make_tree ~input:Tree.(pair value value) ~output:Tree.value layer (x, w) in
@@ -71,7 +74,7 @@ let () =
     (match Ir.invariant g with
      | () -> true
      | exception Failure _ -> false);
-  Check.value "layer graph" ~expected:(layer (x, w)) (List.hd (Ir.run g [ x; w ]))
+  Check.value "layer graph" ~expected:(layer (x, w)) (Ir.run g [ x; w ] |> List.hd)
 ;;
 
 let () =
@@ -91,7 +94,7 @@ let () =
   Check.raises ~matches:Check.is_type_error "run rejects an input count" (fun () ->
     Ir.run g []);
   Check.raises ~matches:Check.is_concretization "tracing cannot read data" (fun () ->
-    Ir.make (fun x -> s (Ops.to_float x)) (s 3.))
+    Ir.make (fun x -> Ops.to_float x |> s) (s 3.))
 ;;
 
 let () =
@@ -126,16 +129,15 @@ let () =
       ~output:Tree.(pair value (list value))
       h
   in
-  List.iter
-    (fun n ->
-       let ys = List.init n (fun i -> s (float_of_int i)) in
-       let sum, sins = g (s 10., ys) in
-       let esum, esins = h (s 10., ys) in
-       Check.value (Printf.sprintf "jit pytree sum, %d leaves" n) ~expected:esum sum;
-       Check.bool
-         (Printf.sprintf "jit pytree list, %d leaves" n)
-         (List.length sins = n && List.for_all2 Ops.allclose sins esins))
-    [ 2; 5; 2; 0; 5 ];
+  [ 2; 5; 2; 0; 5 ]
+  |> List.iter (fun n ->
+    let ys = List.init n (fun i -> s (float_of_int i)) in
+    let sum, sins = g (s 10., ys) in
+    let esum, esins = h (s 10., ys) in
+    Check.value (Printf.sprintf "jit pytree sum, %d leaves" n) ~expected:esum sum;
+    Check.bool
+      (Printf.sprintf "jit pytree list, %d leaves" n)
+      (List.length sins = n && List.for_all2 Ops.allclose sins esins));
   let k (xs, ys) = [ Ops.(List.fold_left ( + ) (scalar 0.) xs * scalar 10.) ] @ ys in
   let g =
     Compile.compile_tree
@@ -146,12 +148,9 @@ let () =
   in
   let a = [ s 1.; s 2. ], [ s 3. ]
   and b = [ s 1. ], [ s 2.; s 3. ] in
-  List.iter
-    (fun (name, x) ->
-       Check.bool
-         ("jit keys on structure: " ^ name)
-         (List.for_all2 Ops.allclose (g x) (k x)))
-    [ "a", a; "b", b; "a again", a ]
+  [ "a", a; "b", b; "a again", a ]
+  |> List.iter (fun (name, x) ->
+    Check.bool ("jit keys on structure: " ^ name) (List.for_all2 Ops.allclose (g x) (k x)))
 ;;
 
 let () =
@@ -166,12 +165,13 @@ let () =
       ~num_vars:g.num_vars
       ()
   in
+  let use_before_def () = rebuild ~eqns:(List.tl g.eqns) () in
   Check.raises
     ~matches:(function
       | Invalid_argument _ -> true
       | _ -> false)
     "run rejects a var used before it is defined"
-    (fun () -> Ir.run1 (rebuild ~eqns:(List.tl g.eqns) ()) (s 1.));
+    (fun () -> Ir.run1 (use_before_def ()) (s 1.));
   let is_failure = function
     | Failure _ -> true
     | _ -> false
@@ -179,28 +179,17 @@ let () =
   Check.raises
     ~matches:is_failure
     "invariant rejects a var used before it is defined"
-    (fun () -> Ir.invariant (rebuild ~eqns:(List.tl g.eqns) ()));
+    (fun () -> use_before_def () |> Ir.invariant);
+  let retype (e : Ir.eqn) =
+    let wrong (v : Ir.var) = Ir.Unchecked.var ~id:v.id (Aval.create [| 7 |]) in
+    Ir.Unchecked.eqn e.prim ~inputs:e.inputs ~outputs:(List.map wrong e.outputs)
+  in
   Check.raises
     ~matches:is_failure
     "invariant rejects an output of the wrong type"
-    (fun () ->
-       Ir.invariant
-         (rebuild
-            ~eqns:
-              (List.map
-                 (fun (e : Ir.eqn) ->
-                    Ir.Unchecked.eqn
-                      e.prim
-                      ~inputs:e.inputs
-                      ~outputs:
-                        (List.map
-                           (fun (v : Ir.var) ->
-                              Ir.Unchecked.var ~id:v.id (Aval.create [| 7 |]))
-                           e.outputs))
-                 g.eqns)
-            ()));
+    (fun () -> rebuild ~eqns:(List.map retype g.eqns) () |> Ir.invariant);
   Check.raises ~matches:is_failure "invariant rejects a var defined twice" (fun () ->
-    Ir.invariant (rebuild ~params:(g.params @ g.params) ()))
+    rebuild ~params:(g.params @ g.params) () |> Ir.invariant)
 ;;
 
 let () =
@@ -233,7 +222,7 @@ let () =
          Check.value
            "closure_convert: run"
            ~expected:(Ops.mul (s 2.) y)
-           (List.hd (Ir.run g' (vs @ [ s 2. ])));
+           (Ir.run g' (vs @ [ s 2. ]) |> List.hd);
          leaked := Some g;
          y)
       (s 5.)
@@ -258,7 +247,7 @@ let () =
   in
   Check.bool
     "dead: the unused sin"
-    (List.map (fun (e : Ir.eqn) -> Prim.name e.prim) (Ir.dead g) = [ "sin" ]);
+    (Ir.dead g |> List.map (fun (e : Ir.eqn) -> Prim.name e.prim) = [ "sin" ]);
   let x = List.hd g.params in
   Check.bool "users of the param" (List.length (Ir.users g).(x.id) = 3);
   Check.bool "params have no producer" ((Ir.producers g).(x.id) = None);
@@ -276,10 +265,9 @@ let () =
   Check.bool "to_dot: dead eqn dashed" (contains "label=\"sin\" style=dashed");
   Check.bool
     "num_vars covers ids"
-    (List.for_all
-       (fun (e : Ir.eqn) ->
-          List.for_all (fun (v : Ir.var) -> v.id < g.num_vars) e.outputs)
-       g.eqns)
+    (g.eqns
+     |> List.for_all (fun (e : Ir.eqn) ->
+       e.outputs |> List.for_all (fun (v : Ir.var) -> v.id < g.num_vars)))
 ;;
 
 let () =
@@ -292,7 +280,8 @@ let () =
   in
   Check.bool
     "mutating Ops.shape leaves the graph alone"
-    (List.map (fun (v : Ir.var) -> v.aval.shape) (g.params @ g.outputs)
+    (g.params @ g.outputs
+     |> List.map (fun (v : Ir.var) -> v.aval.shape)
      = [ [| 3 |]; [| 3 |] ]);
   Check.value
     "and it still runs"

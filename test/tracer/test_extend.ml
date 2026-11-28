@@ -56,7 +56,10 @@ let () =
   un "reduce_min" (fun x -> Ops.reduce_min x) (a ());
   un "mean keepdims" (Ops.mean ~axes:[ 0 ] ~keepdims:true) (a ());
   un "reshape" (Ops.reshape ~shape:[| 3; 2 |]) (a ());
-  un "squeeze/expand_dims" (fun x -> Ops.squeeze (Ops.expand_dims ~axes:[ 1 ] x)) (a ());
+  un
+    "squeeze/expand_dims"
+    (fun x -> x |> Ops.expand_dims ~axes:[ 1 ] |> Ops.squeeze)
+    (a ());
   bin "concatenate" (fun x y -> Ops.concatenate ~axis:1 [ x; y ]) (a ()) (rand [| 2; 2 |]);
   bin "stack" (fun x y -> Ops.stack ~axis:(-1) [ x; y ]) (a ()) (a ());
   un "slice" (Ops.slice ~axis:1 ~start:1 ~stop:3) (a ());
@@ -67,9 +70,8 @@ let () =
   Check.value
     "reduce_max"
     ~expected:(Ops.array [| 3.; 6. |])
-    (Ops.reduce_max
-       ~axes:[ 1 ]
-       (Ops.array ~shape:[| 2; 3 |] [| 1.; 3.; 2.; 6.; 5.; 4. |]));
+    (Ops.array ~shape:[| 2; 3 |] [| 1.; 3.; 2.; 6.; 5.; 4. |]
+     |> Ops.reduce_max ~axes:[ 1 ]);
   Check.value
     "dot = matmul by hand"
     ~expected:(Ops.array ~shape:[| 2; 2 |] [| 19.; 22.; 43.; 50. |])
@@ -79,9 +81,8 @@ let () =
   Check.value
     "[3,1] + [1,4] broadcasts to [3,4]"
     ~expected:
-      (Ops.array
-         ~shape:[| 3; 4 |]
-         (Array.init 12 (fun i -> float ((i / 4 * 10) + (i mod 4)))))
+      (Array.init 12 (fun i -> float ((i / 4 * 10) + (i mod 4)))
+       |> Ops.array ~shape:[| 3; 4 |])
     (Ops.add
        (Ops.array ~shape:[| 3; 1 |] [| 0.; 10.; 20. |])
        (Ops.array ~shape:[| 1; 4 |] [| 0.; 1.; 2.; 3. |]));
@@ -91,10 +92,10 @@ let () =
     (Ops.concatenate [ Ops.array [| 1. |]; Ops.array [| 2.; 3. |] ]);
   Check.value
     "jacfwd sin = diag cos"
-    ~expected:(Ops.mul (Ops.eye 3) (Ops.cos (Ops.array [| 0.; 1.; 2. |])))
+    ~expected:Ops.(eye 3 * cos (array [| 0.; 1.; 2. |]))
     (Ad.jacfwd Ops.sin (Ops.array [| 0.; 1.; 2. |]));
   Check.raises ~matches:Check.is_type_error "to_float rejects a vector" (fun () ->
-    Ops.to_float (Ops.array [| 1.; 2. |]));
+    Ops.array [| 1.; 2. |] |> Ops.to_float);
   Check.raises ~matches:Check.is_type_error "array rejects a wrong length" (fun () ->
     Ops.array ~shape:[| 2; 2 |] [| 1. |]);
   Check.raises ~matches:Check.is_type_error "dot rejects misaligned shapes" (fun () ->
@@ -117,7 +118,7 @@ let () =
     (Ops.dot
        (Ops.array [| 1.; 2. |])
        (Ops.array ~shape:[| 2; 3 |] [| 1.; 2.; 3.; 4.; 5.; 6. |]));
-  let f (x, ys) = Ops.mul x (List.fold_left Ops.add (s 0.) ys) in
+  let f (x, ys) = List.fold_left Ops.add (s 0.) ys |> Ops.mul x in
   let ins = Tree.(pair value (list value)) in
   let y, dy =
     Ad.jvp_tree
@@ -129,7 +130,7 @@ let () =
   in
   Check.float "jvp on a pair of value and list: primal" ~expected:14. (Ops.to_float y);
   Check.float "jvp on a pair of value and list: tangent" ~expected:9. (Ops.to_float dy);
-  let net { w; b } x = Ops.add (Ops.dot w x) b in
+  let net { w; b } x = Ops.(dot w x + b) in
   let x = Ops.array [| 1.; 2. |] in
   let p = { w = Ops.eye 2; b = Ops.zeros [| 2 |] } in
   let dp = { w = Ops.zeros [| 2; 2 |]; b = Ops.ones [| 2 |] } in
@@ -150,15 +151,15 @@ let () =
     (fun () -> Ad.jvp_tree ~input:vs ~output:vs Fun.id [ s 1.; s 2. ] [ s 1. ]);
   Check.bool
     "Tree.map doubles every leaf"
-    (List.map
-       Ops.to_float
-       (Tree.leaves ins (Tree.map ins (Ops.mul (s 2.)) (s 1., [ s 2. ])))
+    (Tree.map ins (Ops.mul (s 2.)) (s 1., [ s 2. ])
+     |> Tree.leaves ins
+     |> List.map Ops.to_float
      = [ 2.; 4. ]);
   Check.bool
     "Tree.map2 pairs the leaves"
-    (List.map
-       Ops.to_float
-       (Tree.leaves ins (Tree.map2 ins Ops.sub (s 5., [ s 7. ]) (s 1., [ s 2. ])))
+    (Tree.map2 ins Ops.sub (s 5., [ s 7. ]) (s 1., [ s 2. ])
+     |> Tree.leaves ins
+     |> List.map Ops.to_float
      = [ 4.; 5. ]);
   Check.raises
     ~matches:Check.is_type_error
@@ -197,24 +198,24 @@ let () =
   Check.float
     "a user primitive evaluates"
     ~expected:(Float.log 2.)
-    (Ops.to_float (softplus (s 0.)));
+    (s 0. |> softplus |> Ops.to_float);
   Check.bool
     "missing_rules lists softplus_ext"
     (List.mem "softplus_ext" (Jvp.missing_rules ()));
   Derivatives.register_elementwise Softplus ~partials:(fun _ xs _ ->
-    List.map (fun x -> Some (fun t -> Ops.mul t (Ops.logistic x))) xs);
+    List.map (fun x -> Some (fun t -> Ops.(t * logistic x))) xs);
   Check.bool
     "softplus_ext has a jvp rule once its partials are registered"
-    (not (List.mem "softplus_ext" (Jvp.missing_rules ())));
+    (Jvp.missing_rules () |> List.mem "softplus_ext" |> not);
   un "user primitive softplus" softplus (rand ~lo:(-2.) [| 2; 3 |]);
   Check.float
     "user primitive nests: softplus'' 0 = 1/4"
     ~expected:0.25
-    (Ops.to_float (Ad.deriv (Ad.deriv softplus) (s 0.)));
+    (Ad.deriv (Ad.deriv softplus) (s 0.) |> Ops.to_float);
   Check.float
     "user primitive, reverse over forward: grad (deriv softplus) 0 = 1/4"
     ~expected:0.25
-    (Ops.to_float (Ad.grad (Ad.deriv softplus) (s 0.)));
+    (Ad.grad (Ad.deriv softplus) (s 0.) |> Ops.to_float);
   let i1 : int Interp.t = Interp.create ~name:"a" (fun _ -> Interp.bind)
   and i2 : int Interp.t = Interp.create ~name:"b" (fun _ -> Interp.bind) in
   Check.bool
@@ -223,10 +224,10 @@ let () =
   Check.bool "payload ignores arrays" (Interp.payload i1 (s 1.) = None);
   Check.bool
     "payload gets an interpreter's own payload back"
-    (Interp.payload i1 (Interp.tracer i1 (Aval.create [||]) 42) = Some 42);
+    (Interp.tracer i1 (Aval.create [||]) 42 |> Interp.payload i1 = Some 42);
   Check.bool
     "payload ignores another interpreter's tracers"
-    (Interp.payload i2 (Interp.tracer i1 (Aval.create [||]) 42) = None);
+    (Interp.tracer i1 (Aval.create [||]) 42 |> Interp.payload i2 = None);
   let module M = struct
     type Prim.t += Twice
   end
@@ -319,11 +320,11 @@ let () =
   Check.value
     "Define.unary grad transposes its deriv"
     ~expected:(Ops.array [| 3.; 12.; 27. |])
-    (Ad.grad (fun x -> Ops.reduce_sum (cube x)) xs);
+    (Ad.grad (fun x -> cube x |> Ops.reduce_sum) xs);
   Check.float
     "Define.unary nests: cube'' 2 = 12"
     ~expected:12.
-    (Ops.to_float (Ad.deriv (Ad.deriv cube) (s 2.)));
+    (Ad.deriv (Ad.deriv cube) (s 2.) |> Ops.to_float);
   un "Define.unary cube" cube (rand ~lo:(-2.) [| 2; 3 |]);
   let m = Ops.array ~shape:[| 2; 3 |] [| 1.; 2.; 3.; 4.; 5.; 6. |] in
   Check.value "Define.unary vmap" ~expected:(cube m) (Vmap.vmap cube m);
@@ -335,16 +336,16 @@ let () =
     "Define.unary jit"
     ~expected:(cube m)
     (Compile.compile ~backend:Compile.jit cube m);
+  let sum_cube x = cube x |> Ops.reduce_sum in
   Check.value
     "Define.unary grad under jit"
-    ~expected:(Ad.grad (fun x -> Ops.reduce_sum (cube x)) m)
-    (Compile.compile ~backend:Compile.jit (Ad.grad (fun x -> Ops.reduce_sum (cube x))) m);
+    ~expected:(Ad.grad sum_cube m)
+    (Compile.compile ~backend:Compile.jit (Ad.grad sum_cube) m);
   Check.bool
     "Define.unary registers every rule"
-    (not
-       (List.exists
-          (fun l -> List.mem "cube_def" l)
-          [ Jvp.missing_rules (); Batching.missing_rules () ]));
+    ([ Jvp.missing_rules (); Batching.missing_rules () ]
+     |> List.exists (List.mem "cube_def")
+     |> not);
   Check.raises
     ~matches:(function
       | Invalid_argument _ -> true
@@ -370,11 +371,11 @@ let () =
   Check.value
     "Define.binary grad in y"
     ~expected:(Ops.array [| 0.8; 12. /. 13. |])
-    (Ad.grad (fun y -> Ops.reduce_sum (hypot x y)) y);
+    (Ad.grad (fun y -> hypot x y |> Ops.reduce_sum) y);
   Check.float
     "Define.binary grad through a broadcast scalar"
     ~expected:(0.8 +. (4. /. Float.hypot 5. 4.))
-    (Ops.to_float (Ad.grad (fun t -> Ops.reduce_sum (hypot x t)) (s 4.)));
+    (Ad.grad (fun t -> hypot x t |> Ops.reduce_sum) (s 4.) |> Ops.to_float);
   bin "Define.binary hypot" hypot (rand [| 2; 3 |]) (rand [| 2; 3 |]);
   bin "Define.binary hypot, broadcast" hypot (rand [| 2; 3 |]) (rand [| 3 |]);
   let p = Ops.array ~shape:[| 2; 2 |] [| 3.; 5.; 6.; 8. |] in
@@ -399,10 +400,10 @@ let () =
     (Compile.compile ~backend:Compile.jit (fun a -> hypot a (s 4.)) p);
   Check.value
     "Define.binary vmap of grad under jit"
-    ~expected:(Ops.div p (hypot p (s 4.)))
+    ~expected:Ops.(p / hypot p (s 4.))
     (Compile.compile
        ~backend:Compile.jit
-       (Vmap.vmap (Ad.grad (fun r -> Ops.reduce_sum (hypot r (s 4.)))))
+       (Vmap.vmap (Ad.grad (fun r -> hypot r (s 4.) |> Ops.reduce_sum)))
        p);
   Check.raises
     ~matches:Check.is_type_error

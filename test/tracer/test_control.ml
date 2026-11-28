@@ -8,22 +8,18 @@ let f x = Control.cond (pos x) ~then_:Ops.(fun x -> x * x * x) ~else_:Ops.sin x
 let f_ref x = if Ops.to_float x > 0. then Ops.(x * x * x) else Ops.sin x
 
 let () =
-  List.iter
-    (fun v ->
-       let x = s v in
-       let name fmt = Printf.sprintf fmt v in
-       Check.value (name "cond %g") ~expected:(f_ref x) (f x);
-       Check.value (name "deriv cond %g") ~expected:(Ad.deriv f_ref x) (Ad.deriv f x);
-       Check.value (name "grad cond %g") ~expected:(Ad.grad f_ref x) (Ad.grad f x);
-       Check.value
-         (name "grad grad cond %g")
-         ~expected:(Ad.grad (Ad.grad f_ref) x)
-         (Ad.grad (Ad.grad f) x);
-       Check.value
-         (name "hessian cond %g")
-         ~expected:(Ad.hessian f_ref x)
-         (Ad.hessian f x))
-    [ 1.5; -0.7 ]
+  [ 1.5; -0.7 ]
+  |> List.iter (fun v ->
+    let x = s v in
+    let name fmt = Printf.sprintf fmt v in
+    Check.value (name "cond %g") ~expected:(f_ref x) (f x);
+    Check.value (name "deriv cond %g") ~expected:(Ad.deriv f_ref x) (Ad.deriv f x);
+    Check.value (name "grad cond %g") ~expected:(Ad.grad f_ref x) (Ad.grad f x);
+    Check.value
+      (name "grad grad cond %g")
+      ~expected:(Ad.grad (Ad.grad f_ref) x)
+      (Ad.grad (Ad.grad f) x);
+    Check.value (name "hessian cond %g") ~expected:(Ad.hessian f_ref x) (Ad.hessian f x))
 ;;
 
 let () =
@@ -49,7 +45,7 @@ let () =
   Check.bool
     "to_string shows branches"
     (String.length str > 0
-     && List.exists (fun l -> String.trim l = "then:") (String.split_on_char '\n' str));
+     && String.split_on_char '\n' str |> List.exists (fun l -> String.trim l = "then:"));
   Check.bool "to_dot has clusters" (Check.contains (Ir.to_dot g) "cluster_")
 ;;
 
@@ -76,7 +72,7 @@ let () =
   Check.value
     "grad through jit, captured"
     ~expected:(s 3.)
-    (Ad.grad (fun y -> Compile.compile ~backend:Compile.jit (h y) (s 3.)) (s 2.))
+    (Ad.grad (fun y -> s 3. |> Compile.compile ~backend:Compile.jit (h y)) (s 2.))
 ;;
 
 let () =
@@ -97,14 +93,14 @@ let () =
   Check.value "tree cond snd" ~expected:x b;
   let a, _ = k (s 0.) (x, w) in
   Check.value "tree cond else" ~expected:(Ops.mul x w) a;
-  let loss (x, w) = Ops.reduce_sum (fst (k (Ops.reduce_sum x) (x, w))) in
+  let loss (x, w) = k (Ops.reduce_sum x) (x, w) |> fst |> Ops.reduce_sum in
   let gx, gw = Ad.grad_tree ~wrt:Tree.(pair value value) loss (x, w) in
   Check.value "tree cond grad x" ~expected:(Ops.zeros [| 3 |]) gx;
   Check.value "tree cond grad w" ~expected:(Ops.ones [| 3 |]) gw;
   Check.fd_check
     "jvp tree cond"
     (function
-      | [ x; w ] -> [ fst (k Ops.(reduce_sum x - scalar 4.) (x, w)) ]
+      | [ x; w ] -> [ k Ops.(reduce_sum x - scalar 4.) (x, w) |> fst ]
       | _ -> assert false)
     [ x; w ];
   Check.raises ~matches:Check.is_type_error "branches of different types" (fun () ->
@@ -127,7 +123,7 @@ let () =
     "jacfwd while"
     ~expected:(Ops.eye 1)
     (Ad.jacfwd
-       (fun x -> Ops.reshape ~shape:[| 1 |] (grow (Ops.reshape ~shape:[||] x)))
+       (fun x -> x |> Ops.reshape ~shape:[||] |> grow |> Ops.reshape ~shape:[| 1 |])
        (Ops.array [| 20. |]));
   let traces = ref 0 in
   let fast =
@@ -154,7 +150,7 @@ let () =
   Check.value "deriv deriv while" ~expected:(s 12.) (Ad.deriv (Ad.deriv pow3) (s 2.));
   Check.bool
     "while graph is well formed"
-    (match Ir.invariant (Ir.make pow3 (s 2.)) with
+    (match Ir.make pow3 (s 2.) |> Ir.invariant with
      | () -> true
      | exception Failure _ -> false);
   Check.raises ~matches:Check.is_type_error "while body changes the type" (fun () ->

@@ -54,7 +54,7 @@ let () =
     let a = Ops.to_array x in
     Check.bool "to_array under grad" (a = [| 1.; 2. |]);
     Check.bool "allclose under grad" (Ops.allclose x (Ops.array [| 1.; 2. |]));
-    Ops.reduce_sum (Ops.sin x)
+    Ops.sin x |> Ops.reduce_sum
   in
   Check.value
     "grad after reads"
@@ -77,25 +77,26 @@ let () =
     (Ad.deriv
        (fun y ->
           let k = Ops.to_float y in
-          Ir.run1 (Ir.make (fun x -> Ops.(x * y * scalar (k /. k))) (s 0.)) (s 2.))
+          let g = Ir.make (fun x -> Ops.(x * y * scalar (k /. k))) (s 0.) in
+          Ir.run1 g (s 2.))
        (s 5.))
 ;;
 
 let () =
   let leak transform =
     let r = ref (s 0.) in
-    ignore
-      (transform (fun x ->
-         r := x;
-         x));
+    transform (fun x ->
+      r := x;
+      x)
+    |> ignore;
     !r
   in
   Check.raises ~matches:Check.is_escaped "leaked jvp tracer cannot be read" (fun () ->
-    Ops.to_float (leak (fun f -> Ad.deriv f (s 1.))));
+    leak (fun f -> Ad.deriv f (s 1.)) |> Ops.to_float);
   Check.raises ~matches:Check.is_escaped "leaked vjp tracer cannot be read" (fun () ->
-    Ops.to_float (leak (fun f -> Ad.grad f (s 1.))));
+    leak (fun f -> Ad.grad f (s 1.)) |> Ops.to_float);
   Check.raises ~matches:Check.is_escaped "leaked stage tracer cannot be read" (fun () ->
-    Ops.to_float (leak (fun f -> Ir.run1 (Ir.make f (s 1.)) (s 1.))))
+    leak (fun f -> Ir.run1 (Ir.make f (s 1.)) (s 1.)) |> Ops.to_float)
 ;;
 
 let () =

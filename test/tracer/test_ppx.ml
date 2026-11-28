@@ -52,7 +52,7 @@ let () =
     "%ops: Float.abs, abs_float, Float.max, tanh"
     ~expected:Ops.(abs x + abs x + maximum x (scalar 1.) + tanh x)
     (float_funs x);
-  let stdlib f = Ops.array (Array.map f [| 0.5; 1.; 2. |]) in
+  let stdlib f = Array.map f [| 0.5; 1.; 2. |] |> Ops.array in
   Check.value
     ~rtol:1e-12
     "%ops: sinh cosh tan asinh tanh"
@@ -86,7 +86,7 @@ let () =
   Check.value
     "%ops under grad: grad softplus = logistic"
     ~expected:(logistic x)
-    (Ad.grad (fun x -> Ops.reduce_sum (softplus x)) x);
+    (Ad.grad (fun x -> softplus x |> Ops.reduce_sum) x);
   Check.value
     "%ops: branch on a value under grad"
     ~expected:(Ops.cos (s 1.))
@@ -131,7 +131,7 @@ type uses_m = { inner : M.t } [@@deriving tree]
 let dense { w; b } x = Ops.(matmul w x + b)
 
 let forward net x =
-  let h = List.fold_left (fun x l -> Ops.relu (dense l x)) x net.hidden in
+  let h = List.fold_left (fun x l -> dense l x |> Ops.relu) x net.hidden in
   Ops.(net.scale * dense net.out h)
 ;;
 
@@ -144,7 +144,7 @@ let () =
     ; scale = s 2.
     }
   in
-  let leaves t v = List.length (Tree.leaves t v) in
+  let leaves t v = Tree.leaves t v |> List.length in
   Check.bool "deriving: nested record leaves" (leaves mlp_tree net = 7);
   Check.bool
     "deriving: leaves in field order"
@@ -161,23 +161,19 @@ let () =
   let rebuilt = Tree.map mlp_tree (Ops.mul (s 2.)) net in
   Check.value "deriving: map rebuilds the record" ~expected:(s 4.) rebuilt.scale;
   let x = Ops.array [| 1.; 2.; 3. |] in
-  let loss net = Ops.reduce_sum (forward net x) in
+  let loss net = forward net x |> Ops.reduce_sum in
   let manual =
-    Tree.(
+    let open Tree in
+    let layer =
       conv
-        ~to_tree:(fun { hidden; out; scale } -> hidden, out, scale)
-        ~of_tree:(fun (hidden, out, scale) -> { hidden; out; scale })
-        (triple
-           (list
-              (conv
-                 ~to_tree:(fun { w; b } -> w, b)
-                 ~of_tree:(fun (w, b) -> { w; b })
-                 (pair value value)))
-           (conv
-              ~to_tree:(fun { w; b } -> w, b)
-              ~of_tree:(fun (w, b) -> { w; b })
-              (pair value value))
-           value))
+        ~to_tree:(fun { w; b } -> w, b)
+        ~of_tree:(fun (w, b) -> { w; b })
+        (pair value value)
+    in
+    conv
+      ~to_tree:(fun { hidden; out; scale } -> hidden, out, scale)
+      ~of_tree:(fun (hidden, out, scale) -> { hidden; out; scale })
+      (triple (list layer) layer value)
   in
   let g = Ad.grad_tree ~wrt:mlp_tree loss net in
   let g' = Ad.grad_tree ~wrt:manual loss net in

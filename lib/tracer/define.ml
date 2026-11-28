@@ -9,7 +9,7 @@ let same_type n p avals =
       Error.type_error
         "%s: operands must have the same type, got %s"
         (Prim.name p)
-        (String.concat " and " (List.map Aval.to_string avals));
+        (List.map Aval.to_string avals |> String.concat " and ");
     [ x ]
   | _ -> Prim.arity_error p ~expected:n avals
 ;;

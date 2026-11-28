@@ -17,46 +17,44 @@ let%ops newton_sqrt a =
     (a, Ops.scalar 0.)
 ;;
 
-let root a = fst (newton_sqrt a)
+let root a = newton_sqrt a |> fst
 
 let conds () =
   title "cond: both branches are traced, one runs";
-  List.iter
-    (fun v ->
-       let x = Ops.scalar v in
-       print (Printf.sprintf "huber %g" v) (huber x);
-       print (Printf.sprintf "grad huber %g" v) (Ad.grad huber x))
-    [ 0.5; -3. ];
+  [ 0.5; -3. ]
+  |> List.iter (fun v ->
+    let x = Ops.scalar v in
+    print (Printf.sprintf "huber %g" v) (huber x);
+    print (Printf.sprintf "grad huber %g" v) (Ad.grad huber x));
   title "cond under jit: one trace serves both branches";
   let fast = Compile.compile ~backend:noisy_jit huber in
-  print "fast 0.5" (fast (Ops.scalar 0.5));
-  print "fast -3" (fast (Ops.scalar (-3.)));
-  print "grad fast -3" (Ad.grad fast (Ops.scalar (-3.)));
+  Ops.scalar 0.5 |> fast |> print "fast 0.5";
+  Ops.scalar (-3.) |> fast |> print "fast -3";
+  Ops.scalar (-3.) |> Ad.grad fast |> print "grad fast -3";
   title "the graph: cond holds its branches";
-  show_graph (Ir.make huber (Ops.scalar 0.))
+  Ir.make huber (Ops.scalar 0.) |> show_graph
 ;;
 
 let loops () =
   title "while_loop: Newton's method for sqrt";
-  List.iter
-    (fun v ->
-       let r, steps = newton_sqrt (Ops.scalar v) in
-       print (Printf.sprintf "sqrt %g" v) r;
-       print "  steps" steps)
-    [ 2.; 100. ];
+  [ 2.; 100. ]
+  |> List.iter (fun v ->
+    let r, steps = newton_sqrt (Ops.scalar v) in
+    print (Printf.sprintf "sqrt %g" v) r;
+    print "  steps" steps);
   title "a loop under jit: the trip count is decided at run time";
   let fast_root = Compile.compile ~backend:noisy_jit root in
-  print "fast_root 2" (fast_root (Ops.scalar 2.));
-  print "fast_root 100" (fast_root (Ops.scalar 100.));
+  Ops.scalar 2. |> fast_root |> print "fast_root 2";
+  Ops.scalar 100. |> fast_root |> print "fast_root 100";
   title "derivatives of a loop: forward mode";
-  print "deriv root 2" (Ad.deriv root (Ops.scalar 2.));
-  print "by hand: 1 / (2 sqrt 2)" (Ops.scalar (1. /. (2. *. Float.sqrt 2.)));
-  print "deriv fast_root 2" (Ad.deriv fast_root (Ops.scalar 2.));
+  Ops.scalar 2. |> Ad.deriv root |> print "deriv root 2";
+  Ops.scalar (1. /. (2. *. Float.sqrt 2.)) |> print "by hand: 1 / (2 sqrt 2)";
+  Ops.scalar 2. |> Ad.deriv fast_root |> print "deriv fast_root 2";
   title "reverse mode needs a fixed trip count";
   match catch (fun () -> Ad.grad root (Ops.scalar 2.)) with
   | Ok _ -> ()
   | Error (Missing_rule msg) -> Printf.printf "  grad root: %s\n" msg
-  | Error e -> failwith (error_to_string e)
+  | Error e -> failwith @@ error_to_string e
 ;;
 
 let run () =

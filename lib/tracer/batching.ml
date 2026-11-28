@@ -24,14 +24,17 @@ module Batching = struct
     if from = to_
     then x
     else (
-      let rest = List.filter (( <> ) from) (Lists.range (Ops.rank x)) in
+      let rest = Lists.range (Ops.rank x) |> List.filter (( <> ) from) in
       let before, after = Lists.split_at to_ rest in
-      Ops.transpose ~perm:(Array.of_list (before @ [ from ] @ after)) x)
+      let perm = before @ [ from ] @ after |> Array.of_list in
+      Ops.transpose ~perm x)
   ;;
 
   let to_front ~size x = function
     | Some d -> move_axis ~from:d ~to_:0 x
-    | None -> Ops.broadcast ~shape:(Array.append [| size |] (Ops.shape x)) ~axes:[ 0 ] x
+    | None ->
+      let shape = Array.append [| size |] (Ops.shape x) in
+      Ops.broadcast ~shape ~axes:[ 0 ] x
   ;;
 
   let front_all ~size xs ds = List.map2 (to_front ~size) xs ds
@@ -39,7 +42,7 @@ module Batching = struct
 
   let unbatched_aval v bdim =
     let a = aval v in
-    Aval.create ~dtype:a.dtype (Shape.remove_dims ~axes:[ bdim ] a.shape)
+    Shape.remove_dims ~axes:[ bdim ] a.shape |> Aval.create ~dtype:a.dtype
   ;;
 
   let unpack self v =
@@ -67,12 +70,9 @@ module Batching = struct
     let in_avals =
       List.map2 (fun x d -> Option.fold ~none:(aval x) ~some:(unbatched_aval x) d) xs ds
     in
-    if
-      not
-        (List.equal
-           Aval.equal
-           (List.map2 element_aval outs douts)
-           (Prim.abstract_eval prim in_avals))
+    let expected = Prim.abstract_eval prim in_avals in
+    let got = List.map2 element_aval outs douts in
+    if not (List.equal Aval.equal got expected)
     then
       Error.type_error
         "vmap rule for %s: outputs do not have the types abstract_eval gives"
@@ -80,11 +80,12 @@ module Batching = struct
   ;;
 
   let process ~size self prim args =
-    let xs, ds = List.split (List.map (unpack self) args) in
+    let xs, ds = args |> List.map (unpack self) |> List.split in
     if List.for_all Option.is_none ds
     then bind prim xs
     else (
-      let outs, douts = (Prim.Table.find rules prim) prim ~size xs ds in
+      let rule = Prim.Table.find rules prim in
+      let outs, douts = rule prim ~size xs ds in
       if List.length outs <> List.length douts
       then
         Error.type_error
@@ -105,8 +106,8 @@ module Batching = struct
   let vmap_flat ~size f xs ds =
     List.iter2 (check_batch_dim ~size) xs ds;
     let self = create ~name:"vmap" (process ~size) in
-    let outs, aux = handle self (fun () -> f (List.map2 (pack self) xs ds)) in
-    let ys, dys = List.split (List.map (unpack self) outs) in
+    let outs, aux = handle self (fun () -> List.map2 (pack self) xs ds |> f) in
+    let ys, dys = outs |> List.map (unpack self) |> List.split in
     ys, dys, aux
   ;;
 
@@ -116,7 +117,7 @@ module Batching = struct
   ;;
 
   let batch_graph ~size (g : Ir.t) xs ds =
-    U.traced (fun xs -> run_front ~size g xs ds) (List.map aval xs)
+    List.map aval xs |> U.traced (fun xs -> run_front ~size g xs ds)
   ;;
 
   let select_front mask a b =
@@ -153,7 +154,7 @@ module Batching = struct
   let front1 p f =
     register_rule
       p
-      (unary (fun p ~size x d -> front_result (bind1 (f p) [ to_front ~size x d ])))
+      (unary (fun p ~size x d -> [ to_front ~size x d ] |> bind1 (f p) |> front_result))
   ;;
 
   let shape_rules () =
@@ -177,23 +178,24 @@ module Batching = struct
       (unary (fun p ~size x d ->
          match p with
          | B.Broadcast { shape; axes } ->
-           front_result
-             (bind1
-                (B.Broadcast { shape = Array.append [| size |] shape; axes = shift axes })
-                [ to_front ~size x d ])
+           let batched =
+             B.Broadcast { shape = Array.append [| size |] shape; axes = shift axes }
+           in
+           [ to_front ~size x d ] |> bind1 batched |> front_result
          | _ -> Prim.arity_error p ~expected:1 [ x ]));
     register_rule
       (B.Reshape [||])
       (unary (fun p ~size x d ->
          match p with
          | B.Reshape shape ->
-           front_result
-             (reshape ~shape:(Array.append [| size |] shape) (to_front ~size x d))
+           to_front ~size x d
+           |> reshape ~shape:(Array.append [| size |] shape)
+           |> front_result
          | _ -> Prim.arity_error p ~expected:1 [ x ]));
     register_rule (B.Concatenate 0) (fun p ~size xs ds ->
       match p with
       | B.Concatenate axis ->
-        front_result (bind1 (B.Concatenate (succ axis)) (front_all ~size xs ds))
+        front_all ~size xs ds |> bind1 (B.Concatenate (succ axis)) |> front_result
       | _ -> Prim.arity_error p ~expected:1 xs)
   ;;
 
@@ -204,20 +206,21 @@ module Batching = struct
       let x = move_axis ~from:d ~to_:0 x in
       let s = shape x
       and n = (shape y).(1) in
-      front_result
-        (reshape
-           ~shape:[| size; s.(1); n |]
-           (mm (reshape ~shape:[| Int.mul size s.(1); s.(2) |] x) y))
+      mm (reshape ~shape:[| Int.mul size s.(1); s.(2) |] x) y
+      |> reshape ~shape:[| size; s.(1); n |]
+      |> front_result
     in
     let batched_right ~size x y d =
       let y = move_axis ~from:d ~to_:1 y in
       let s = shape y
       and m = (shape x).(0) in
-      ( [ reshape
-            ~shape:[| m; size; s.(2) |]
-            (mm x (reshape ~shape:[| s.(0); Int.mul size s.(2) |] y))
-        ]
-      , [ Some 1 ] )
+      let z =
+        y
+        |> reshape ~shape:[| s.(0); Int.mul size s.(2) |]
+        |> mm x
+        |> reshape ~shape:[| m; size; s.(2) |]
+      in
+      [ z ], [ Some 1 ]
     in
     let batched_both ~size x dx y dy =
       let x = to_front ~size x dx
@@ -227,7 +230,7 @@ module Batching = struct
       let full = [| size; sx.(1); sx.(2); sy.(2) |] in
       let x = broadcast ~shape:full ~axes:[ 3 ] x
       and y = broadcast ~shape:full ~axes:[ 1 ] y in
-      front_result (reduce_sum ~axes:[ 2 ] (mul x y))
+      x * y |> reduce_sum ~axes:[ 2 ] |> front_result
     in
     register_rule
       B.Dot
@@ -242,13 +245,13 @@ module Batching = struct
     match p with
     | Staging.Compile.Call { name; graph } ->
       let g, dims =
-        U.traced_aux
-          (fun xs ->
-             let ys, dys, () = vmap_flat ~size (U.as_fn graph) xs ds in
-             ys, dys)
-          (List.map aval xs)
+        List.map aval xs
+        |> U.traced_aux (fun xs ->
+          let ys, dys, () = vmap_flat ~size (U.as_fn graph) xs ds in
+          ys, dys)
       in
-      bind (Staging.Compile.Call { name = "vmap(" ^ name ^ ")"; graph = g }) xs, dims
+      let name = "vmap(" ^ name ^ ")" in
+      bind (Staging.Compile.Call { name; graph = g }) xs, dims
     | _ -> Prim.arity_error p ~expected:0 xs
   ;;
 
@@ -268,7 +271,8 @@ module Batching = struct
                })
             ((pred :: at) @ ae)
         | Some d ->
-          let mask = Ops.greater (move_axis ~from:d ~to_:0 pred) (Ops.scalar 0.) in
+          let pred = move_axis ~from:d ~to_:0 pred in
+          let mask = Ops.greater pred (Ops.scalar 0.) in
           let yt = run_front ~size then_ at dt
           and ye = run_front ~size else_ ae de in
           List.map2 (select_front mask) yt ye
@@ -296,46 +300,43 @@ module Batching = struct
       in
       let carry_avals = List.map aval carry in
       let cond' =
-        U.traced
-          (fun l ->
-             let ac, carry = Lists.split_at nc l in
-             [ Ops.reduce_max (still_running ac carry) ])
-          (List.map aval ac @ carry_avals)
+        List.map aval ac @ carry_avals
+        |> U.traced (fun l ->
+          let ac, carry = Lists.split_at nc l in
+          [ still_running ac carry |> Ops.reduce_max ])
       in
       let body' =
-        U.traced
-          (fun l ->
-             let ac, l = Lists.split_at nc l in
-             let ab, carry = Lists.split_at nb l in
-             let running = still_running ac carry in
-             let next = run_front ~size body (ab @ carry) (dab @ front) in
-             List.map2 (select_front running) next carry)
-          (List.map aval ac @ List.map aval ab @ carry_avals)
+        List.map aval ac @ List.map aval ab @ carry_avals
+        |> U.traced (fun l ->
+          let ac, l = Lists.split_at nc l in
+          let ab, carry = Lists.split_at nb l in
+          let running = still_running ac carry in
+          let next = run_front ~size body (ab @ carry) (dab @ front) in
+          List.map2 (select_front running) next carry)
       in
       bind (C.While { cond = cond'; body = body' }) (ac @ ac @ ab @ carry), front
     | _ -> Prim.arity_error p ~expected:0 xs
   ;;
 
   let () =
-    List.iter
-      elementwise
-      B.
-        [ Add
-        ; Sub
-        ; Mul
-        ; Div
-        ; Max
-        ; Greater
-        ; Less
-        ; Neg
-        ; Sin
-        ; Cos
-        ; Exp
-        ; Log
-        ; Sqrt
-        ; Integer_pow 0
-        ; Select
-        ];
+    B.
+      [ Add
+      ; Sub
+      ; Mul
+      ; Div
+      ; Max
+      ; Greater
+      ; Less
+      ; Neg
+      ; Sin
+      ; Cos
+      ; Exp
+      ; Log
+      ; Sqrt
+      ; Integer_pow 0
+      ; Select
+      ]
+    |> List.iter elementwise;
     shape_rules ();
     dot_rule ();
     register_rule (Staging.Compile.Call { name = ""; graph = U.empty }) call_rule;
@@ -360,20 +361,19 @@ module Vmap = struct
 
   let batch_size xs ds =
     let sizes =
-      List.filter_map
-        (fun (x, d) ->
-           match d with
-           | Some d when d >= 0 && d < Ops.rank x -> Some (Ops.shape x).(d)
-           | Some d -> Error.type_error "vmap: %s has no axis %d" (Ops.describe x) d
-           | None -> None)
-        (List.combine xs ds)
+      List.combine xs ds
+      |> List.filter_map (fun (x, d) ->
+        match d with
+        | Some d when d >= 0 && d < Ops.rank x -> Some (Ops.shape x).(d)
+        | Some d -> Error.type_error "vmap: %s has no axis %d" (Ops.describe x) d
+        | None -> None)
     in
     match sizes with
     | [] -> Error.type_error "vmap: no input is batched"
     | n :: rest when List.exists (( <> ) n) rest ->
       Error.type_error
         "vmap: batched inputs have different sizes (%s)"
-        (String.concat ", " (List.map string_of_int sizes))
+        (List.map string_of_int sizes |> String.concat ", ")
     | n :: _ -> n
   ;;
 
@@ -389,12 +389,13 @@ module Vmap = struct
     let xs, s = Tree.flatten in_tree x in
     let ds = batch_dims ?in_axes ~in_axis xs in
     let size = batch_size xs ds in
-    let ys, dys, out = Bt.vmap_flat ~size (Tree.flat_fn in_tree out_tree f s) xs ds in
+    let flat_f = Tree.flat_fn in_tree out_tree f s in
+    let ys, dys, out = Bt.vmap_flat ~size flat_f xs ds in
     let place y d =
       let y = Bt.to_front ~size y d in
       Bt.move_axis ~from:0 ~to_:(normalize_axis ~rank:(Ops.rank y) out_axis) y
     in
-    Tree.unflatten out_tree out (List.map2 place ys dys)
+    List.map2 place ys dys |> Tree.unflatten out_tree out
   ;;
 
   let vmap ?in_axis ?out_axis f x =

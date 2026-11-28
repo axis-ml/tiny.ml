@@ -20,7 +20,7 @@ let () =
     ~rtol:1e-15
     "f 3.0 = 2.7177599838802657"
     ~expected:2.7177599838802657
-    (Ops.to_float (f (s 3.)));
+    (s 3. |> f |> Ops.to_float);
   let y, dy = Ad.jvp f (s 3.) (s 1.) in
   Check.float "jvp f 3.0: primal" ~expected:2.7177599838802657 (Ops.to_float y);
   Check.float
@@ -30,16 +30,16 @@ let () =
   let d = Ad.deriv
   and sin = Ops.sin
   and x = s 3. in
-  Check.float "deriv sin = cos" ~expected:(Float.cos 3.) (Ops.to_float (d sin x));
-  Check.float "deriv^2 sin = -sin" ~expected:(-.Float.sin 3.) (Ops.to_float (d (d sin) x));
+  Check.float "deriv sin = cos" ~expected:(Float.cos 3.) (d sin x |> Ops.to_float);
+  Check.float "deriv^2 sin = -sin" ~expected:(-.Float.sin 3.) (d (d sin) x |> Ops.to_float);
   Check.float
     "deriv^3 sin = -cos"
     ~expected:(-.Float.cos 3.)
-    (Ops.to_float (d (d (d sin)) x));
+    (d (d (d sin)) x |> Ops.to_float);
   Check.float
     "deriv^4 sin = sin"
     ~expected:(Float.sin 3.)
-    (Ops.to_float (d (d (d (d sin))) x));
+    (d (d (d (d sin))) x |> Ops.to_float);
   let pc x =
     let g _ = x in
     let should_be_zero = Ad.deriv g (s 0.) in
@@ -48,12 +48,12 @@ let () =
   Check.float
     "perturbation confusion (Autodidax2) = 0"
     ~expected:0.
-    (Ops.to_float (Ad.deriv pc (s 0.)));
-  let sp x = Ops.mul x (Ad.deriv (fun y -> Ops.add x y) (s 1.)) in
+    (Ad.deriv pc (s 0.) |> Ops.to_float);
+  let sp x = Ad.deriv (fun y -> Ops.add x y) (s 1.) |> Ops.mul x in
   Check.float
     "perturbation confusion (Siskind-Pearlmutter) = 1"
     ~expected:1.
-    (Ops.to_float (Ad.deriv sp (s 1.)));
+    (Ad.deriv sp (s 1.) |> Ops.to_float);
   let a () = rand [| 2; 3 |] in
   un "neg" Ops.neg (a ());
   un "sin" Ops.sin (a ());
@@ -74,7 +74,7 @@ let () =
   un "transpose 3D" (Ops.transpose ~perm:[| 2; 0; 1 |]) (rand [| 2; 3; 4 |]);
   bin "scalar * array (auto broadcast)" Ops.mul (rand [||]) (a ());
   bin "row + matrix (auto broadcast)" Ops.add (rand [| 3 |]) (a ());
-  un "composite" Ops.(fun x -> reduce_sum (sin x * x / exp x)) (a ());
+  un "composite" Ops.(fun x -> sin x * x / exp x |> reduce_sum) (a ());
   Check.raises
     ~matches:Check.is_type_error
     "jvp rejects tangent of wrong shape"
@@ -112,12 +112,12 @@ let () =
     "current interpreter restored after an error inside a rule"
     (Interp.stack_to_string () = "eval");
   let leaked = ref (s 0.) in
-  ignore
-    (Ad.deriv
-       (fun x ->
-          leaked := x;
-          x)
-       (s 1.));
+  Ad.deriv
+    (fun x ->
+       leaked := x;
+       x)
+    (s 1.)
+  |> ignore;
   Check.raises
     ~matches:Check.is_escaped
     "escaped jvp tracer is rejected by eval"
@@ -129,12 +129,9 @@ let () =
       ops := Prim.name prim :: !ops;
       Interp.bind prim args)
   in
-  ignore
-    (Interp.handle counter (fun () ->
-       Ad.jvp
-         (fun x -> Ops.add (Ops.mul x m) m)
-         (Ops.ones [| 1000 |])
-         (Ops.ones [| 1000 |])));
+  Interp.handle counter (fun () ->
+    Ad.jvp (fun x -> Ops.((x * m) + m)) (Ops.ones [| 1000 |]) (Ops.ones [| 1000 |]))
+  |> ignore;
   Check.bool
     "jvp of x * m + m binds only mul, mul, add: no zero tangent work"
     (List.sort compare !ops = [ "add"; "mul"; "mul" ]);

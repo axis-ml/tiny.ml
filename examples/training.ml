@@ -14,8 +14,8 @@ type mlp =
 [@@deriving tree]
 
 let%ops dense { w; b } x = matmul x w +. b
-let%ops predict net x = dense net.out (tanh (dense net.hidden x))
-let%ops loss net (x, y) = mean (square (predict net x -. y))
+let%ops predict net x = x |> dense net.hidden |> tanh |> dense net.out
+let%ops loss net (x, y) = predict net x -. y |> square |> mean
 
 let sgd_step data net =
   let grads = Ad.grad_tree ~wrt:mlp_tree (fun net -> loss net data) net in
@@ -26,7 +26,7 @@ let init ~hidden =
   let rng = Random.State.make [| 42 |] in
   let random shape =
     let n = Array.fold_left ( * ) 1 shape in
-    Ops.array ~shape (Array.init n (fun _ -> Random.State.float rng 2. -. 1.))
+    Array.init n (fun _ -> Random.State.float rng 2. -. 1.) |> Ops.array ~shape
   in
   { hidden = { w = random [| 1; hidden |]; b = random [| hidden |] }
   ; out = { w = random [| hidden; 1 |]; b = Ops.zeros [| 1 |] }
@@ -48,7 +48,7 @@ let train ~steps ~log_every ~step ~loss net0 =
 let flat v = Ops.reshape ~shape:[| Ops.size v |] v
 
 let run () =
-  let x = Ops.reshape ~shape:[| 32; 1 |] (Ops.linspace (-3.) 3. 32) in
+  let x = Ops.linspace (-3.) 3. 32 |> Ops.reshape ~shape:[| 32; 1 |] in
   let data = x, Ops.sin x in
   let step =
     Compile.compile_tree
@@ -68,9 +68,9 @@ let run () =
   in
   title "the network against sin";
   let probe = Ops.array ~shape:[| 4; 1 |] [| -2.; -0.5; 1.; 2.5 |] in
-  print "x" (flat probe);
-  print "predict" (flat (predict net probe));
-  print "sin x" (flat (Ops.sin probe))
+  flat probe |> print "x";
+  predict net probe |> flat |> print "predict";
+  Ops.sin probe |> flat |> print "sin x"
 ;;
 
 let example =

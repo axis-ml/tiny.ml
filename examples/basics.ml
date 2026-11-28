@@ -44,14 +44,14 @@ let newton () =
   let n = 4 in
   let iterates = Seq.iterate (newton_step g) (Ops.scalar 1.) in
   let steps = iterates |> Seq.drop 1 |> Seq.take n |> List.of_seq in
-  List.iteri (fun i x -> print (Printf.sprintf "step %d" (i + 1)) x) steps;
-  print "cos x - x" (g (List.nth steps (n - 1)))
+  steps |> List.iteri (fun i x -> print (Printf.sprintf "step %d" (i + 1)) x);
+  List.nth steps (n - 1) |> g |> print "cos x - x"
 ;;
 
 let branching () =
   title "f may branch on its argument's value";
-  print "deriv leaky 2" (Ad.deriv leaky (Ops.scalar 2.));
-  print "deriv leaky (-2)" (Ad.deriv leaky (Ops.scalar (-2.)))
+  Ops.scalar 2. |> Ad.deriv leaky |> print "deriv leaky 2";
+  Ops.scalar (-2.) |> Ad.deriv leaky |> print "deriv leaky (-2)"
 ;;
 
 let run () =

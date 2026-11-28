@@ -30,9 +30,9 @@ let ref_transpose ~perm a =
 let ref_reduce_sum ~axes a =
   let s = Ndarray.shape a in
   let n = Array.length s in
-  let kept = List.filter (fun d -> not (List.mem d axes)) (List.init n Fun.id) in
-  let oshape = Array.of_list (List.map (fun d -> s.(d)) kept) in
-  let out = Ndarray.to_array (Ndarray.zeros oshape) in
+  let kept = List.init n Fun.id |> List.filter (fun d -> not (List.mem d axes)) in
+  let oshape = kept |> List.map (fun d -> s.(d)) |> Array.of_list in
+  let out = Ndarray.zeros oshape |> Ndarray.to_array in
   for i = 0 to Ndarray.size a - 1 do
     let idx = unravel s i in
     let o = ref 0 in
@@ -52,7 +52,7 @@ let ref_slice ~axis ~start ~stop a =
 ;;
 
 let ref_concatenate ~axis arrays =
-  let s = Array.copy (Ndarray.shape (List.hd arrays)) in
+  let s = List.hd arrays |> Ndarray.shape |> Array.copy in
   s.(axis) <- List.fold_left (fun acc a -> acc + (Ndarray.shape a).(axis)) 0 arrays;
   ref_init s (fun idx ->
     let rec find j = function
@@ -120,9 +120,9 @@ let () =
   Check.array
     "reduce_sum 3D middle axis"
     ~expected:(nd [| 2; 2 |] [| 4.; 6.; 12.; 14. |])
-    (Ndarray.reduce_sum
-       ~axes:[ 1 ]
-       (nd [| 2; 2; 2 |] (Array.init 8 (fun i -> float (i + 1)))));
+    (Array.init 8 (fun i -> float (i + 1))
+     |> nd [| 2; 2; 2 |]
+     |> Ndarray.reduce_sum ~axes:[ 1 ]);
   Check.array
     "dot [2,3] x [3,2]"
     ~expected:(nd [| 2; 2 |] [| 4.; 5.; 10.; 11. |])
@@ -134,7 +134,9 @@ let () =
     Ndarray.reduce_sum ~axes:[ 2 ] a23);
   Check.bool
     "expand_dims shape"
-    (Ndarray.shape (Ndarray.expand_dims ~axes:[ 0; 2 ] (nd [| 3 |] [| 1.; 2.; 3. |]))
+    (nd [| 3 |] [| 1.; 2.; 3. |]
+     |> Ndarray.expand_dims ~axes:[ 0; 2 ]
+     |> Ndarray.shape
      = [| 1; 3; 1 |]);
   Check.array
     "broadcast scalar"
@@ -173,62 +175,51 @@ let () =
   Check.raises "transpose rejects non-permutation" (fun () ->
     Ndarray.transpose ~perm:[| 0; 0 |] a23);
   let x4 = iota [| 3; 4; 5; 6 |] in
-  List.iter
-    (fun perm ->
-       exact
-         (Printf.sprintf "transpose 4D perm=%s" (Ndarray.shape_to_string perm))
-         ~expected:(ref_transpose ~perm x4)
-         (Ndarray.transpose ~perm x4))
-    [ [| 3; 1; 0; 2 |]; [| 0; 1; 3; 2 |]; [| 0; 1; 2; 3 |]; [| 3; 2; 1; 0 |] ];
-  List.iter
-    (fun axes ->
-       exact
-         (Printf.sprintf
-            "reduce_sum 4D axes=%s"
-            (Ndarray.shape_to_string (Array.of_list axes)))
-         ~expected:(ref_reduce_sum ~axes x4)
-         (Ndarray.reduce_sum ~axes x4))
-    [ [ 0 ]; [ 3 ]; [ 0; 2 ]; [ 1; 3 ]; [ 1; 2 ]; [ 0; 1; 2; 3 ] ];
+  let list_to_string l = Array.of_list l |> Ndarray.shape_to_string in
+  [ [| 3; 1; 0; 2 |]; [| 0; 1; 3; 2 |]; [| 0; 1; 2; 3 |]; [| 3; 2; 1; 0 |] ]
+  |> List.iter (fun perm ->
+    exact
+      (Printf.sprintf "transpose 4D perm=%s" (Ndarray.shape_to_string perm))
+      ~expected:(ref_transpose ~perm x4)
+      (Ndarray.transpose ~perm x4));
+  [ [ 0 ]; [ 3 ]; [ 0; 2 ]; [ 1; 3 ]; [ 1; 2 ]; [ 0; 1; 2; 3 ] ]
+  |> List.iter (fun axes ->
+    exact
+      (Printf.sprintf "reduce_sum 4D axes=%s" (list_to_string axes))
+      ~expected:(ref_reduce_sum ~axes x4)
+      (Ndarray.reduce_sum ~axes x4));
   exact
     "broadcast 4D new axes and size-1 dim"
     ~expected:
       (ref_init [| 2; 3; 4; 5 |] (fun idx -> float ((idx.(1) * 10) + idx.(3) + 1)))
-    (Ndarray.broadcast
-       ~shape:[| 2; 3; 4; 5 |]
-       ~axes:[ 0; 2 ]
-       (Ndarray.init [| 3; 5 |] (fun i -> float ((i / 5 * 10) + (i mod 5) + 1))));
+    (Ndarray.init [| 3; 5 |] (fun i -> float ((i / 5 * 10) + (i mod 5) + 1))
+     |> Ndarray.broadcast ~shape:[| 2; 3; 4; 5 |] ~axes:[ 0; 2 ]);
   let big = iota [| 4; 50; 30 |] in
-  List.iter
-    (fun (axis, start, stop) ->
-       let name = Printf.sprintf "slice axis=%d [%d, %d)" axis start stop in
-       exact
-         name
-         ~expected:(ref_slice ~axis ~start ~stop x4)
-         (Ndarray.slice ~axis ~start ~stop x4);
-       exact
-         (name ^ " long runs")
-         ~expected:(ref_slice ~axis ~start ~stop big)
-         (Ndarray.slice ~axis ~start ~stop big))
-    [ 0, 1, 3; 1, 1, 3; 2, 2, 4; 2, 0, 0; 1, 0, 4 ];
+  [ 0, 1, 3; 1, 1, 3; 2, 2, 4; 2, 0, 0; 1, 0, 4 ]
+  |> List.iter (fun (axis, start, stop) ->
+    let name = Printf.sprintf "slice axis=%d [%d, %d)" axis start stop in
+    exact
+      name
+      ~expected:(ref_slice ~axis ~start ~stop x4)
+      (Ndarray.slice ~axis ~start ~stop x4);
+    exact
+      (name ^ " long runs")
+      ~expected:(ref_slice ~axis ~start ~stop big)
+      (Ndarray.slice ~axis ~start ~stop big));
   let parts axis sizes =
-    List.mapi
-      (fun k m ->
-         let s = Array.copy (Ndarray.shape x4) in
-         s.(axis) <- m;
-         Ndarray.map (fun x -> x +. (1000. *. float k)) (iota s))
-      sizes
+    sizes
+    |> List.mapi (fun k m ->
+      let s = Array.copy (Ndarray.shape x4) in
+      s.(axis) <- m;
+      iota s |> Ndarray.map (fun x -> x +. (1000. *. float k)))
   in
-  List.iter
-    (fun (axis, sizes) ->
-       let arrays = parts axis sizes in
-       exact
-         (Printf.sprintf
-            "concatenate axis=%d sizes=%s"
-            axis
-            (Ndarray.shape_to_string (Array.of_list sizes)))
-         ~expected:(ref_concatenate ~axis arrays)
-         (Ndarray.concatenate ~axis arrays))
-    [ 0, [ 1; 2; 3 ]; 1, [ 2; 0; 3 ]; 2, [ 4; 1 ]; 3, [ 6; 6; 1 ]; 1, [ 40; 25 ] ];
+  [ 0, [ 1; 2; 3 ]; 1, [ 2; 0; 3 ]; 2, [ 4; 1 ]; 3, [ 6; 6; 1 ]; 1, [ 40; 25 ] ]
+  |> List.iter (fun (axis, sizes) ->
+    let arrays = parts axis sizes in
+    exact
+      (Printf.sprintf "concatenate axis=%d sizes=%s" axis (list_to_string sizes))
+      ~expected:(ref_concatenate ~axis arrays)
+      (Ndarray.concatenate ~axis arrays));
   let s = Ndarray.scalar 2.5 in
   exact "transpose rank 0" ~expected:s (Ndarray.transpose ~perm:[||] s);
   exact "reduce_sum rank 0" ~expected:s (Ndarray.reduce_sum ~axes:[] s);
@@ -236,15 +227,15 @@ let () =
   exact
     "transpose zero-size"
     ~expected:(Ndarray.zeros [| 3; 0; 2 |])
-    (Ndarray.transpose ~perm:[| 2; 1; 0 |] (Ndarray.zeros [| 2; 0; 3 |]));
+    (Ndarray.zeros [| 2; 0; 3 |] |> Ndarray.transpose ~perm:[| 2; 1; 0 |]);
   exact
     "reduce_sum over a zero-size axis"
     ~expected:(Ndarray.zeros [| 2; 3 |])
-    (Ndarray.reduce_sum ~axes:[ 1 ] (Ndarray.zeros [| 2; 0; 3 |]));
+    (Ndarray.zeros [| 2; 0; 3 |] |> Ndarray.reduce_sum ~axes:[ 1 ]);
   exact
     "reduce_sum of zero-size keeping it"
     ~expected:(Ndarray.zeros [| 0 |])
-    (Ndarray.reduce_sum ~axes:[ 1 ] (Ndarray.zeros [| 0; 3 |]));
+    (Ndarray.zeros [| 0; 3 |] |> Ndarray.reduce_sum ~axes:[ 1 ]);
   exact
     "broadcast to zero-size"
     ~expected:(Ndarray.zeros [| 0; 3 |])
@@ -252,7 +243,7 @@ let () =
   exact
     "slice of zero-size"
     ~expected:(Ndarray.zeros [| 0; 2 |])
-    (Ndarray.slice ~axis:1 ~start:1 ~stop:3 (Ndarray.zeros [| 0; 4 |]));
+    (Ndarray.zeros [| 0; 4 |] |> Ndarray.slice ~axis:1 ~start:1 ~stop:3);
   exact
     "concatenate zero-size"
     ~expected:(Ndarray.zeros [| 0; 5 |])
@@ -260,15 +251,14 @@ let () =
   (let y = Ndarray.slice ~axis:1 ~start:0 ~stop:50 big in
    Bigarray.Genarray.set y [| 0; 0; 0 |] (-1.);
    Check.bool "slice returns a fresh array" (get big [| 0; 0; 0 |] = 1.));
-  List.iter
-    (fun (x, s) ->
-       Check.bool (Printf.sprintf "float_repr %s" s) (Ndarray.float_repr x = s))
-    [ 2., "2.0"
-    ; 0.1, "0.1"
-    ; -0.5, "-0.5"
-    ; 1e-5, "1e-05"
-    ; 2.7177599838802657, "2.7177599838802657"
-    ];
+  [ 2., "2.0"
+  ; 0.1, "0.1"
+  ; -0.5, "-0.5"
+  ; 1e-5, "1e-05"
+  ; 2.7177599838802657, "2.7177599838802657"
+  ]
+  |> List.iter (fun (x, s) ->
+    Check.bool (Printf.sprintf "float_repr %s" s) (Ndarray.float_repr x = s));
   Check.bool "to_string" (Ndarray.to_string a23 = "[[1.0 2.0 3.0] [4.0 5.0 6.0]]");
   Check.finish ()
 ;;

@@ -163,7 +163,7 @@ module Shape = struct
 
   let insert_ones ~axes s =
     let rank = Array.length s + List.length axes in
-    scatter ~rank ~default:1 (List.combine (kept_dims ~rank axes) (Array.to_list s))
+    Array.to_list s |> List.combine (kept_dims ~rank axes) |> scatter ~rank ~default:1
   ;;
 
   let set_dim ~axis n s = Array.mapi (fun d x -> if d = axis then n else x) s
@@ -196,7 +196,7 @@ module Shape = struct
 
   let broadcast_shapes a b =
     let n = max (Array.length a) (Array.length b) in
-    let pad s = Array.to_list (Array.append (Array.make (n - Array.length s) 1) s) in
+    let pad s = Array.append (Array.make (n - Array.length s) 1) s |> Array.to_list in
     let dim x y =
       match x, y with
       | x, y when x = y -> Some x
@@ -318,7 +318,7 @@ module Ndarray = struct
   ;;
 
   let check_axes ~fn ~rank axes =
-    Option.iter (invalid "%s: %s" fn) (Shape.axes_error ~rank axes)
+    Shape.axes_error ~rank axes |> Option.iter (invalid "%s: %s" fn)
   ;;
 
   let map f a =
@@ -361,16 +361,10 @@ module Ndarray = struct
       let fa = flat a
       and fb = flat b in
       let entry i j =
-        let rec sum p acc =
-          if p = k
-          then acc
-          else
-            sum
-              (p + 1)
-              (acc
-               +. (Array1.unsafe_get fa ((i * k) + p) *. Array1.unsafe_get fb ((p * n) + j)
-                  ))
+        let term p =
+          Array1.unsafe_get fa ((i * k) + p) *. Array1.unsafe_get fb ((p * n) + j)
         in
+        let rec sum p acc = if p = k then acc else sum (p + 1) (acc +. term p) in
         sum 0 0.
       in
       init [| m; n |] (fun o -> entry (o / n) (o mod n))
@@ -387,10 +381,10 @@ module Ndarray = struct
     check_axes ~fn ~rank axes;
     let oshape = Shape.remove_dims ~axes ishape in
     let into =
-      Shape.scatter
-        ~rank
-        ~default:0
-        (List.combine (Shape.kept_dims ~rank axes) (Array.to_list (Shape.strides oshape)))
+      Shape.strides oshape
+      |> Array.to_list
+      |> List.combine (Shape.kept_dims ~rank axes)
+      |> Shape.scatter ~rank ~default:0
     in
     let out = full oshape z in
     let fo = flat out
@@ -452,7 +446,7 @@ module Ndarray = struct
         in
         ignore (List.fold_left copy_from (o * row) runs : int)
       in
-      List.iter copy_row (Lists.range outer);
+      Lists.range outer |> List.iter copy_row;
       out
   ;;
 
@@ -467,9 +461,9 @@ module Ndarray = struct
     let out = create (Shape.set_dim ~axis (stop - start) s) in
     let fo = flat out
     and fa = flat a in
-    List.iter
-      (fun o -> copy_run fa (((o * s.(axis)) + start) * inner) fo (o * len) len)
-      (Lists.range outer);
+    Lists.range outer
+    |> List.iter (fun o ->
+      copy_run fa (((o * s.(axis)) + start) * inner) fo (o * len) len);
     out
   ;;
 
@@ -486,7 +480,7 @@ module Ndarray = struct
     if Array.length s + List.length axes <> m then fail ();
     check_axes ~fn ~rank:m axes;
     let source =
-      List.combine (Shape.kept_dims ~rank:m axes) (Lists.range (Array.length s))
+      Lists.range (Array.length s) |> List.combine (Shape.kept_dims ~rank:m axes)
     in
     let sst = Shape.strides s in
     let stride d =
@@ -545,10 +539,12 @@ module Ndarray = struct
     let rec show d off =
       if d = Array.length s
       then float_repr (Array1.get fa off)
-      else
-        "["
-        ^ String.concat " " (List.init s.(d) (fun i -> show (d + 1) (off + (i * st.(d)))))
-        ^ "]"
+      else (
+        let items =
+          List.init s.(d) (fun i -> show (d + 1) (off + (i * st.(d))))
+          |> String.concat " "
+        in
+        "[" ^ items ^ "]")
     in
     show 0 0
   ;;

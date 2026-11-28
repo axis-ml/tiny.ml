@@ -34,20 +34,16 @@ let value ?rtol ?atol name ~expected got =
 ;;
 
 let rand ?(lo = 0.5) ?(hi = 2.0) shape =
-  Ops.of_ndarray (Ndarray.init shape (fun _ -> lo +. Random.float (hi -. lo)))
+  Ndarray.init shape (fun _ -> lo +. Random.float (hi -. lo)) |> Ops.of_ndarray
 ;;
 
 let fd_check ?(eps = 1e-6) name f xs =
   let dxs = List.map (fun x -> rand ~lo:(-1.) ~hi:1. (Ops.shape x)) xs in
   let vs = Tree.(list value) in
   let _, tangents = Ad.jvp_tree ~input:vs ~output:vs f xs dxs in
-  let at t = f (List.map2 (fun x dx -> Ops.add x (Ops.mul (Ops.scalar t) dx)) xs dxs) in
-  let fd =
-    List.map2
-      (fun p m -> Ops.div (Ops.sub p m) (Ops.scalar (2. *. eps)))
-      (at eps)
-      (at (-.eps))
-  in
+  let at t = List.map2 (fun x dx -> Ops.(x + (scalar t * dx))) xs dxs |> f in
+  let central p m = Ops.((p - m) / scalar (2. *. eps)) in
+  let fd = List.map2 central (at eps) (at (-.eps)) in
   List.iter2 (fun t e -> value ~rtol:1e-6 ~atol:1e-6 name ~expected:e t) tangents fd
 ;;
 

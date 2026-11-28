@@ -26,16 +26,15 @@ let () =
       ~output:Tree.(pair value (list value))
       h
   in
-  List.iter
-    (fun n ->
-       let ys = List.init n (fun i -> s (float_of_int i)) in
-       let sum, sins = g (s 10., ys) in
-       let esum, esins = h (s 10., ys) in
-       Check.value (Printf.sprintf "pytree sum, %d leaves" n) ~expected:esum sum;
-       Check.bool
-         (Printf.sprintf "pytree list, %d leaves" n)
-         (List.length sins = n && List.for_all2 Ops.allclose sins esins))
-    [ 0; 2; 5 ]
+  [ 0; 2; 5 ]
+  |> List.iter (fun n ->
+    let ys = List.init n (fun i -> s (float_of_int i)) in
+    let sum, sins = g (s 10., ys) in
+    let esum, esins = h (s 10., ys) in
+    Check.value (Printf.sprintf "pytree sum, %d leaves" n) ~expected:esum sum;
+    Check.bool
+      (Printf.sprintf "pytree list, %d leaves" n)
+      (List.length sins = n && List.for_all2 Ops.allclose sins esins))
 ;;
 
 let () =
@@ -53,8 +52,8 @@ let () =
   end
   in
   let g = Compile.compile ~backend:(module Counting) f in
-  ignore (g (s 1.));
-  ignore (g (s 2.));
+  g (s 1.) |> ignore;
+  g (s 2.) |> ignore;
   Check.bool "backend prepares once" (!prepared = 1);
   Check.bool "backend runs per call" (!calls = 2);
   Check.value "backend result" ~expected:(f (s 2.)) (g (s 2.))
@@ -79,12 +78,11 @@ let () =
 ;;
 
 let calls g =
-  List.filter
-    (fun (e : Ir.eqn) ->
-       match e.prim with
-       | Compile.Call _ -> true
-       | _ -> false)
-    g.Ir.eqns
+  g.Ir.eqns
+  |> List.filter (fun (e : Ir.eqn) ->
+    match e.prim with
+    | Compile.Call _ -> true
+    | _ -> false)
 ;;
 
 let only_calls g = List.length (calls g) = List.length g.Ir.eqns
@@ -109,10 +107,10 @@ let () =
   Check.bool "grad of jit graph is well formed" (Ir.invariant gg = ());
   Check.bool
     "jvp of jit is one call"
-    (only_calls (Ir.make (fun x -> snd (Ad.jvp jh x dx)) x));
+    (Ir.make (fun x -> Ad.jvp jh x dx |> snd) x |> only_calls);
   Check.bool
     "vmap of jit is one call"
-    (only_calls (Ir.make (Vmap.vmap jh) (Check.rand [| 3; 4 |])));
+    (Check.rand [| 3; 4 |] |> Ir.make (Vmap.vmap jh) |> only_calls);
   Check.value "jit" ~expected:(h x) (jh x);
   Check.value "grad of jit" ~expected:(Ad.grad h x) (Ad.grad jh x);
   let y, dy = Ad.jvp jh x dx
@@ -127,8 +125,8 @@ let () =
     (Vmap.vmap (Ad.grad jh) xs);
   Check.value
     "grad of vmap of jit"
-    ~expected:(Ad.grad (fun x -> Ops.reduce_sum (Vmap.vmap h x)) xs)
-    (Ad.grad (fun x -> Ops.reduce_sum (Vmap.vmap jh x)) xs);
+    ~expected:(Ad.grad (fun x -> Vmap.vmap h x |> Ops.reduce_sum) xs)
+    (Ad.grad (fun x -> Vmap.vmap jh x |> Ops.reduce_sum) xs);
   Check.value "hessian of jit" ~expected:(Ad.hessian h x) (Ad.hessian jh x);
   Check.value
     "jacrev of grad of jit"
@@ -136,10 +134,10 @@ let () =
     (Ad.jacrev (Ad.grad jh) x);
   Check.value
     "grad of grad of jit"
-    ~expected:(Ad.grad (fun x -> Ops.reduce_sum (Ad.grad h x)) x)
-    (Ad.grad (fun x -> Ops.reduce_sum (Ad.grad jh x)) x);
+    ~expected:(Ad.grad (fun x -> Ad.grad h x |> Ops.reduce_sum) x)
+    (Ad.grad (fun x -> Ad.grad jh x |> Ops.reduce_sum) x);
   Check.bool "transformations of jit do not retrace" (!traces = 1);
-  ignore (jh (Check.rand [| 2; 2 |]));
+  Check.rand [| 2; 2 |] |> jh |> ignore;
   Check.bool "jit retraces for a new shape" (!traces = 2);
   Check.value
     "jit on the new shape"
@@ -167,16 +165,16 @@ let () =
   Check.value "jit of jit" ~expected:(expected x) (outer x);
   Check.value
     "grad of jit of jit"
-    ~expected:(Ad.grad (fun x -> Ops.reduce_sum (expected x)) x)
-    (Ad.grad (fun x -> Ops.reduce_sum (outer x)) x);
+    ~expected:(Ad.grad (fun x -> expected x |> Ops.reduce_sum) x)
+    (Ad.grad (fun x -> outer x |> Ops.reduce_sum) x);
   Check.value
     "vmap of jit of jit"
     ~expected:(Vmap.vmap expected (Check.rand ~lo:1. ~hi:1. [| 2; 3 |]))
     (Vmap.vmap outer (Check.rand ~lo:1. ~hi:1. [| 2; 3 |]));
   Check.value
     "hessian of jit of jit"
-    ~expected:(Ad.hessian (fun x -> Ops.reduce_sum (expected x)) x)
-    (Ad.hessian (fun x -> Ops.reduce_sum (outer x)) x)
+    ~expected:(Ad.hessian (fun x -> expected x |> Ops.reduce_sum) x)
+    (Ad.hessian (fun x -> outer x |> Ops.reduce_sum) x)
 ;;
 
 let () =
@@ -215,20 +213,19 @@ let () =
       x
   in
   let jl = Compile.compile ~backend:Compile.jit leaky in
-  List.iter
-    (fun v ->
-       let x = s v in
-       let name what = Printf.sprintf "%s at %g" what v in
-       Check.value (name "cond inside jit") ~expected:(leaky x) (jl x);
-       Check.value
-         (name "grad of cond inside jit")
-         ~expected:(Ad.grad leaky x)
-         (Ad.grad jl x);
-       Check.value
-         (name "hessian of cond inside jit")
-         ~expected:(Ad.hessian leaky x)
-         (Ad.hessian jl x))
-    [ 2.; -3. ];
+  [ 2.; -3. ]
+  |> List.iter (fun v ->
+    let x = s v in
+    let name what = Printf.sprintf "%s at %g" what v in
+    Check.value (name "cond inside jit") ~expected:(leaky x) (jl x);
+    Check.value
+      (name "grad of cond inside jit")
+      ~expected:(Ad.grad leaky x)
+      (Ad.grad jl x);
+    Check.value
+      (name "hessian of cond inside jit")
+      ~expected:(Ad.hessian leaky x)
+      (Ad.hessian jl x));
   let xs = Ops.array [| -2.; 0.5; 3. |] in
   Check.value "vmap of cond inside jit" ~expected:(Vmap.vmap leaky xs) (Vmap.vmap jl xs);
   let sq = Compile.compile ~backend:Compile.jit Ops.(fun x -> sin x * x) in
@@ -242,20 +239,16 @@ let () =
       ~else_:Ops.(fun x -> (sin (x * x) * x * x) + x)
       x
   in
-  List.iter
-    (fun v ->
-       let x = s v in
-       let name what = Printf.sprintf "%s at %g" what v in
-       Check.value (name "jit inside cond") ~expected:(br' x) (br x);
-       Check.value
-         (name "grad of jit inside cond")
-         ~expected:(Ad.grad br' x)
-         (Ad.grad br x);
-       Check.value
-         (name "hessian of jit inside cond")
-         ~expected:(Ad.hessian br' x)
-         (Ad.hessian br x))
-    [ 2.; -3. ];
+  [ 2.; -3. ]
+  |> List.iter (fun v ->
+    let x = s v in
+    let name what = Printf.sprintf "%s at %g" what v in
+    Check.value (name "jit inside cond") ~expected:(br' x) (br x);
+    Check.value (name "grad of jit inside cond") ~expected:(Ad.grad br' x) (Ad.grad br x);
+    Check.value
+      (name "hessian of jit inside cond")
+      ~expected:(Ad.hessian br' x)
+      (Ad.hessian br x));
   Check.value "vmap of jit inside cond" ~expected:(Vmap.vmap br' xs) (Vmap.vmap br xs)
 ;;
 
@@ -285,7 +278,7 @@ let () =
   Check.value
     "grad of jit with a constant output"
     ~expected:(Ops.cos x)
-    (Ad.grad (fun x -> Ops.(reduce_sum (fst (jh x) + snd (jh x)))) x)
+    (Ad.grad (fun x -> Ops.(fst (jh x) + snd (jh x) |> reduce_sum)) x)
 ;;
 
 let () = Check.finish ()

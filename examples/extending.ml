@@ -24,9 +24,9 @@ let run () =
   print "softplus xs" (softplus xs);
   print "deriv softplus xs" (Ad.deriv softplus xs);
   print "logistic xs (by hand)" (Ops.logistic xs);
-  print "grad (sum (softplus xs))" (Ad.grad (fun x -> Ops.reduce_sum (softplus x)) xs);
+  Ad.grad (fun x -> softplus x |> Ops.reduce_sum) xs |> print "grad (sum (softplus xs))";
   title "the primitives run by deriv softplus";
-  print "result" (trace_ops (Ad.deriv softplus) xs)
+  trace_ops (Ad.deriv softplus) xs |> print "result"
 ;;
 
 let example =

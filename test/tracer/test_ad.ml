@@ -145,26 +145,26 @@ let () =
   let z = Z.zero_like x in
   let nz v = Z.Nonzero (s v) in
   Check.bool "zero_like is a zero" (Z.is_zero z);
-  Check.bool "Nonzero is not" (not (Z.is_zero (nz 1.)));
-  Check.bool "map keeps a zero" (Z.is_zero (Z.map ~like:x Ops.neg z));
+  Check.bool "Nonzero is not" (nz 1. |> Z.is_zero |> not);
+  Check.bool "map keeps a zero" (Z.map ~like:x Ops.neg z |> Z.is_zero);
   Check.value
     "map maps"
     ~expected:(s (-3.))
-    (Z.instantiate (Z.map ~like:x Ops.neg (nz 3.)));
+    (Z.map ~like:x Ops.neg (nz 3.) |> Z.instantiate);
   Check.value
     "add skips a zero"
     ~expected:(s 3.)
-    (Z.instantiate (Z.add ~like:x z (nz 3.)));
-  Check.value "add adds" ~expected:(s 5.) (Z.instantiate (Z.add ~like:x (nz 2.) (nz 3.)));
-  Check.bool "add of zeros is a zero" (Z.is_zero (Z.add ~like:x z z));
+    (Z.add ~like:x z (nz 3.) |> Z.instantiate);
+  Check.value "add adds" ~expected:(s 5.) (Z.add ~like:x (nz 2.) (nz 3.) |> Z.instantiate);
+  Check.bool "add of zeros is a zero" (Z.add ~like:x z z |> Z.is_zero);
   Check.value
     "sub of a zero negates"
     ~expected:(s (-3.))
-    (Z.instantiate (Z.sub ~like:x z (nz 3.)));
+    (Z.sub ~like:x z (nz 3.) |> Z.instantiate);
   Check.value
     "sub subtracts"
     ~expected:(s (-1.))
-    (Z.instantiate (Z.sub ~like:x (nz 2.) (nz 3.)));
+    (Z.sub ~like:x (nz 2.) (nz 3.) |> Z.instantiate);
   Check.value "instantiate a zero" ~expected:(s 0.) (Z.instantiate z)
 ;;
 

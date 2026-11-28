@@ -7,8 +7,8 @@ let rand = Check.rand
 
 let loop ?(axis = 0) ?(out = 0) f x =
   let n = (Ops.shape x).(axis) in
-  let at i = Ops.squeeze ~axes:[ axis ] (Ops.slice ~axis ~start:i ~stop:(i + 1) x) in
-  Ops.stack ~axis:out (List.init n (fun i -> f (at i)))
+  let at i = Ops.slice ~axis ~start:i ~stop:(i + 1) x |> Ops.squeeze ~axes:[ axis ] in
+  List.init n (fun i -> at i |> f) |> Ops.stack ~axis:out
 ;;
 
 let same ?(axis = 0) ?(out = 0) name f x =
@@ -55,24 +55,23 @@ let () =
       ; ("unbatched output", [| 3 |], fun _ -> v)
       ]
   in
-  List.iter
-    (fun (name, shape, f) ->
-       let n = 5 in
-       let r = Array.length shape in
-       same ("vmap " ^ name) f (rand (Array.append [| n |] shape));
-       same
-         ~axis:r
-         ~out:(-1)
-         ("vmap last axis " ^ name)
-         f
-         (rand (Array.append shape [| n |])))
-    cases
+  cases
+  |> List.iter (fun (name, shape, f) ->
+    let n = 5 in
+    let r = Array.length shape in
+    same ("vmap " ^ name) f (Array.append [| n |] shape |> rand);
+    same
+      ~axis:r
+      ~out:(-1)
+      ("vmap last axis " ^ name)
+      f
+      (Array.append shape [| n |] |> rand))
 ;;
 
 let () =
   let x = rand [| 5; 3 |]
   and w = rand [| 3 |] in
-  let f (x, w) = Ops.(reduce_sum (x * w)) in
+  let f (x, w) = Ops.(x * w |> reduce_sum) in
   let p = Tree.(pair value value) in
   Check.value
     "in_axes: shared leaf"
@@ -82,13 +81,13 @@ let () =
 
 let () =
   let w = rand [| 3; 3 |] in
-  let f x = Ops.(reduce_sum (tanh (dot w x) * x)) in
+  let f x = Ops.(tanh (dot w x) * x |> reduce_sum) in
   let xs = rand [| 6; 3 |] in
   same "vmap of grad: per-example gradients" (Ad.grad f) xs;
   Check.value
     "grad of sum of vmap"
-    ~expected:(Ad.grad (fun xs -> Ops.reduce_sum (loop f xs)) xs)
-    (Ad.grad (fun xs -> Ops.reduce_sum (Vmap.vmap f xs)) xs);
+    ~expected:(Ad.grad (fun xs -> loop f xs |> Ops.reduce_sum) xs)
+    (Ad.grad (fun xs -> Vmap.vmap f xs |> Ops.reduce_sum) xs);
   let dxs = rand [| 6; 3 |] in
   let y, dy = Ad.jvp (Vmap.vmap f) xs dxs in
   let y', dy' = Ad.jvp (loop f) xs dxs in
@@ -113,15 +112,13 @@ let () =
 let () =
   let a = rand [| 4 |]
   and b = rand [| 3 |] in
-  let outer = Vmap.vmap (fun x -> Vmap.vmap (fun y -> Ops.(x * y)) b) a in
+  let outer_product a = Vmap.vmap (fun x -> Vmap.vmap (fun y -> Ops.(x * y)) b) a in
+  let outer = outer_product a in
   Check.value "nested vmap: outer product" ~expected:(loop (fun x -> Ops.(x * b)) a) outer;
   Check.value
     "grad through nested vmap"
-    ~expected:Ops.(broadcast_to ~shape:[| 4 |] (reduce_sum b))
-    (Ad.grad
-       (fun a ->
-          Ops.reduce_sum (Vmap.vmap (fun x -> Vmap.vmap (fun y -> Ops.(x * y)) b) a))
-       a)
+    ~expected:Ops.(reduce_sum b |> broadcast_to ~shape:[| 4 |])
+    (Ad.grad (fun a -> outer_product a |> Ops.reduce_sum) a)
 ;;
 
 let () =
@@ -133,7 +130,7 @@ let () =
   Check.value
     "grad of vmap cond"
     ~expected:(loop (Ad.grad f) xs)
-    (Ad.grad (fun xs -> Ops.reduce_sum (Vmap.vmap f xs)) xs);
+    (Ad.grad (fun xs -> Vmap.vmap f xs |> Ops.reduce_sum) xs);
   let g p x = Control.cond p ~then_:Ops.(fun x -> x * scalar 2.) ~else_:Ops.neg x in
   same "vmap cond, shared predicate, then" (g (s 1.)) xs;
   same "vmap cond, shared predicate, else" (g (s (-1.))) xs;
@@ -148,21 +145,21 @@ let () =
   same "vmap while, per-element trip counts" grow xs;
   same "vmap deriv while" (Ad.deriv grow) xs;
   let pow y =
-    snd
-      (Control.while_loop_tree
-         ~carry:Tree.(pair value value)
-         ~cond:(fun (i, _) -> Ops.(i < scalar 3.))
-         ~body:(fun (i, acc) -> Ops.(i + scalar 1., acc * y))
-         (s 0., s 1.))
+    Control.while_loop_tree
+      ~carry:Tree.(pair value value)
+      ~cond:(fun (i, _) -> Ops.(i < scalar 3.))
+      ~body:(fun (i, acc) -> Ops.(i + scalar 1., acc * y))
+      (s 0., s 1.)
+    |> snd
   in
   same "vmap while, batched capture" pow xs;
   let count n =
-    fst
-      (Control.while_loop_tree
-         ~carry:Tree.(pair value value)
-         ~cond:(fun (i, _) -> Ops.(i < n))
-         ~body:(fun (i, acc) -> Ops.(i + scalar 1., acc * scalar 2.))
-         (s 0., s 1.))
+    Control.while_loop_tree
+      ~carry:Tree.(pair value value)
+      ~cond:(fun (i, _) -> Ops.(i < n))
+      ~body:(fun (i, acc) -> Ops.(i + scalar 1., acc * scalar 2.))
+      (s 0., s 1.)
+    |> fst
   in
   same "vmap while, batched bound" count (Ops.array [| 0.; 2.; 5. |])
 ;;
@@ -171,9 +168,8 @@ let () =
   let missing = Batching.missing_rules () in
   Check.bool
     "every builtin, cond, while and call have a vmap rule"
-    (List.for_all
-       (fun n -> not (List.mem n missing))
-       ("cond" :: "while" :: "call" :: List.map Prim.name Builtin.all));
+    ("cond" :: "while" :: "call" :: List.map Prim.name Builtin.all
+     |> List.for_all (fun n -> not (List.mem n missing)));
   Check.raises ~matches:Check.is_type_error "vmap: different batch sizes" (fun () ->
     Vmap.vmap_tree
       ~input:Tree.(pair value value)
@@ -188,7 +184,7 @@ let () =
       Fun.id
       (rand [| 3 |]));
   Check.raises ~matches:Check.is_concretization "vmap: no concrete value" (fun () ->
-    Vmap.vmap (fun x -> s (Ops.to_float x)) (rand [| 3 |]))
+    Vmap.vmap (fun x -> Ops.to_float x |> s) (rand [| 3 |]))
 ;;
 
 let () = Check.finish ()

@@ -19,7 +19,7 @@ module Prim = struct
       |> Seq.exists (fun (k', i) -> k' <> k && String.equal i.name name)
     in
     if taken_by_another
-    then invalid_arg ("Prim.register: another primitive is already named " ^ name);
+    then invalid_arg @@ "Prim.register: another primitive is already named " ^ name;
     Hashtbl.replace registry k { name; abstract_eval; impl }
   ;;
 
@@ -27,8 +27,8 @@ module Prim = struct
     match Hashtbl.find_opt registry (key p) with
     | Some i -> i
     | None ->
-      invalid_arg
-        ("Prim: unregistered primitive " ^ Obj.Extension_constructor.(name (of_val p)))
+      let constructor = Obj.Extension_constructor.(name (of_val p)) in
+      invalid_arg @@ "Prim: unregistered primitive " ^ constructor
   ;;
 
   let name p = (info p).name
@@ -178,12 +178,12 @@ module Interp = struct
     let arrays = List.map expect_array args in
     let expected = Prim.abstract_eval prim (List.map Aval.of_ndarray arrays) in
     let outs = Prim.impl prim arrays in
-    if not (List.equal Aval.equal (List.map Aval.of_ndarray outs) expected)
+    if not (List.map Aval.of_ndarray outs |> List.equal Aval.equal expected)
     then
-      failwith
-        (Printf.sprintf
-           "%s: impl and abstract_eval disagree on the output type"
-           (Prim.name prim));
+      Printf.ksprintf
+        failwith
+        "%s: impl and abstract_eval disagree on the output type"
+        (Prim.name prim);
     List.map of_ndarray outs
   ;;
 
@@ -261,7 +261,9 @@ module Interp = struct
            t.interp.name)
   ;;
 
-  let stack_to_string () = String.concat " < " ("eval" :: List.rev_map label (stack ()))
+  let stack_to_string () =
+    stack () |> List.rev_map label |> List.cons "eval" |> String.concat " < "
+  ;;
 end
 
 module Builtin = struct
@@ -302,8 +304,10 @@ module Builtin = struct
         }
 
   let check_axes p ~rank axes =
-    Option.iter (Error.type_error "%s: %s" (Prim.name p)) (Shape.axes_error ~rank axes)
+    Shape.axes_error ~rank axes |> Option.iter (Error.type_error "%s: %s" (Prim.name p))
   ;;
+
+  let avals_to_string avals = List.map Aval.to_string avals |> String.concat " and "
 
   let same_types p = function
     | [] -> Prim.arity_error p ~expected:1 []
@@ -313,7 +317,7 @@ module Builtin = struct
         Error.type_error
           "%s: operands must have the same type, got %s"
           (Prim.name p)
-          (String.concat " and " (List.map Aval.to_string all));
+          (avals_to_string all);
       x
   ;;
 
@@ -329,7 +333,7 @@ module Builtin = struct
 
   let reduce_type p axes x =
     check_axes p ~rank:(Array.length x.shape) axes;
-    Aval.create ~dtype:x.dtype (Shape.remove_dims ~axes x.shape)
+    Shape.remove_dims ~axes x.shape |> Aval.create ~dtype:x.dtype
   ;;
 
   let dot_type p avals =
@@ -340,7 +344,7 @@ module Builtin = struct
       Error.type_error
         "%s: expected [m; k] and [k; n], got %s"
         (Prim.name p)
-        (String.concat " and " (List.map Aval.to_string avals))
+        (avals_to_string avals)
     | _ -> Prim.arity_error p ~expected:2 avals
   ;;
 
@@ -373,7 +377,7 @@ module Builtin = struct
     if not (Shape.is_perm ~rank:(Array.length x.shape) perm)
     then
       Error.type_error "%s: invalid permutation for %s" (Prim.name p) (Aval.to_string x);
-    Aval.create ~dtype:x.dtype (Array.map (Array.get x.shape) perm)
+    Array.map (Array.get x.shape) perm |> Aval.create ~dtype:x.dtype
   ;;
 
   let reshape_type p shape x =
@@ -409,9 +413,9 @@ module Builtin = struct
           "%s: shapes must match except on axis %d, got %s"
           (Prim.name p)
           axis
-          (String.concat " and " (List.map Aval.to_string avals));
+          (avals_to_string avals);
       let total = List.fold_left (fun n a -> n + a.shape.(axis)) 0 avals in
-      Aval.create ~dtype:x.dtype (Shape.set_dim ~axis total x.shape)
+      Shape.set_dim ~axis total x.shape |> Aval.create ~dtype:x.dtype
   ;;
 
   let slice_type p ~axis ~start ~stop x =
@@ -425,7 +429,7 @@ module Builtin = struct
         stop
         (Aval.to_string x)
         axis;
-    Aval.create ~dtype:x.dtype (Shape.set_dim ~axis (stop - start) x.shape)
+    Shape.set_dim ~axis (stop - start) x.shape |> Aval.create ~dtype:x.dtype
   ;;
 
   let abstract_eval p avals =
@@ -442,7 +446,7 @@ module Builtin = struct
       | Concatenate axis -> concatenate_type p axis avals
       | Slice { axis; start; stop } -> unary p (slice_type p ~axis ~start ~stop) avals
       | _ ->
-        invalid_arg ("Builtin.abstract_eval: not a built-in primitive: " ^ Prim.name p)
+        invalid_arg @@ "Builtin.abstract_eval: not a built-in primitive: " ^ Prim.name p
     in
     [ out ]
   ;;
@@ -601,7 +605,7 @@ module Ops = struct
     let s = shape x in
     let r = Array.length s + List.length axes in
     let axes = Shape.normalize_axes ~rank:r axes in
-    Option.iter (Error.type_error "expand_dims: %s") (Shape.axes_error ~rank:r axes);
+    Shape.axes_error ~rank:r axes |> Option.iter (Error.type_error "expand_dims: %s");
     reshape ~shape:(Shape.insert_ones ~axes s) x
   ;;
 
@@ -611,7 +615,7 @@ module Ops = struct
     let axes =
       match axes with
       | Some axes -> Shape.normalize_axes ~rank:r axes
-      | None -> List.filter (fun d -> s.(d) = 1) (Lists.range r)
+      | None -> Lists.range r |> List.filter (fun d -> s.(d) = 1)
     in
     let not_unit d = d < 0 || d >= r || s.(d) <> 1 in
     List.find_opt not_unit axes
@@ -627,7 +631,7 @@ module Ops = struct
       Error.type_error "cannot broadcast %s to %s" (shape_str s) (shape_str target)
     in
     if lead < 0 then fail ();
-    let dims = List.mapi (fun i d -> lead + i, d, target.(lead + i)) (Array.to_list s) in
+    let dims = Array.to_list s |> List.mapi (fun i d -> lead + i, d, target.(lead + i)) in
     if List.exists (fun (_, d, t) -> d <> t && d <> 1) dims then fail ();
     let new_axes, kept =
       List.partition_map
@@ -660,7 +664,7 @@ module Ops = struct
       Error.type_error
         "%s: cannot broadcast %s together (dims must match from the right, or be 1)"
         (Prim.name p)
-        (String.concat " and " (List.map shape_str shapes))
+        (List.map shape_str shapes |> String.concat " and ")
   ;;
 
   let binop p x y = bind1 p (broadcast_operands p [ x; y ])
@@ -682,38 +686,56 @@ module Ops = struct
   let one_minus m = sub (scalar 1.) m
   let greater_equal x y = one_minus (less x y)
   let less_equal x y = one_minus (greater x y)
-  let equal x y = mul (one_minus (greater x y)) (one_minus (less x y))
-  let not_equal x y = one_minus (equal x y)
-  let minimum x y = neg (maximum (neg x) (neg y))
-  let square x = integer_pow ~exponent:2 x
-  let abs x = select (less x (scalar 0.)) (neg x) x
-  let relu x = maximum x (scalar 0.)
-  let logistic x = div (scalar 1.) (add (scalar 1.) (exp (neg x)))
-
-  let tanh x =
-    let e = exp (mul (scalar (-2.)) (abs x)) in
-    let t = div (one_minus e) (add (scalar 1.) e) in
-    select (less x (scalar 0.)) (neg t) t
-  ;;
-
-  let tan x = div (sin x) (cos x)
-  let sinh x = mul (scalar 0.5) (sub (exp x) (exp (neg x)))
-  let cosh x = mul (scalar 0.5) (add (exp x) (exp (neg x)))
-
-  let asinh x =
-    let a = abs x in
-    let t = log (add a (sqrt (add (square a) (scalar 1.)))) in
-    select (less x (scalar 0.)) (neg t) t
-  ;;
-
-  let acosh x = log (add x (sqrt (sub (square x) (scalar 1.))))
-  let atanh x = mul (scalar 0.5) (log (div (add (scalar 1.) x) (one_minus x)))
 
   let pow ~exponent:p x =
     if Float.is_integer p && Float.abs p <= 64.
     then integer_pow ~exponent:(int_of_float p) x
     else exp (mul (scalar p) (log x))
   ;;
+
+  module Infix = struct
+    let ( + ) = add
+    let ( - ) = sub
+    let ( * ) = mul
+    let ( / ) = div
+    let ( ~- ) = neg
+    let ( ** ) x p = pow ~exponent:p x
+    let ( > ) = greater
+    let ( < ) = less
+    let ( >= ) = greater_equal
+    let ( <= ) = less_equal
+  end
+
+  (* The formulas below read as math: [Infix] is opened locally, so [+] is [add]. *)
+  let is_negative x = less x (scalar 0.)
+  let equal x y = Infix.(one_minus (x > y) * one_minus (x < y))
+  let not_equal x y = one_minus (equal x y)
+  let minimum x y = Infix.(-(maximum (-x) (-y)))
+  let square x = integer_pow ~exponent:2 x
+  let abs x = select (is_negative x) (neg x) x
+  let relu x = maximum x (scalar 0.)
+  let logistic x = Infix.(scalar 1. / (scalar 1. + exp (-x)))
+
+  let tanh x =
+    let open Infix in
+    let e = exp (scalar (-2.) * abs x) in
+    let t = one_minus e / (scalar 1. + e) in
+    select (is_negative x) (-t) t
+  ;;
+
+  let tan x = Infix.(sin x / cos x)
+  let sinh x = Infix.(scalar 0.5 * (exp x - exp (-x)))
+  let cosh x = Infix.(scalar 0.5 * (exp x + exp (-x)))
+
+  let asinh x =
+    let open Infix in
+    let a = abs x in
+    let t = log (a + sqrt (square a + scalar 1.)) in
+    select (is_negative x) (-t) t
+  ;;
+
+  let acosh x = Infix.(log (x + sqrt (square x - scalar 1.)))
+  let atanh x = Infix.(scalar 0.5 * log ((scalar 1. + x) / one_minus x))
 
   let reduce p_of ?axes ?(keepdims = false) x =
     let r = rank x in
@@ -724,26 +746,28 @@ module Ops = struct
     in
     let y = unop (p_of axes) x in
     if keepdims
-    then
-      reshape
-        ~shape:(Array.mapi (fun d n -> if List.mem d axes then 1 else n) (shape x))
-        y
+    then (
+      let kept = shape x |> Array.mapi (fun d n -> if List.mem d axes then 1 else n) in
+      reshape ~shape:kept y)
     else y
   ;;
 
   let reduce_sum ?axes ?keepdims x = reduce (fun a -> B.Reduce_sum a) ?axes ?keepdims x
   let reduce_max ?axes ?keepdims x = reduce (fun a -> B.Reduce_max a) ?axes ?keepdims x
-  let reduce_min ?axes ?keepdims x = neg (reduce_max ?axes ?keepdims (neg x))
+  let reduce_min ?axes ?keepdims x = x |> neg |> reduce_max ?axes ?keepdims |> neg
 
   let mean ?axes ?keepdims x =
     let total = reduce_sum ?axes ?keepdims x in
-    div total (scalar (float (size x / max 1 (size total))))
+    let count = size x / max 1 (size total) in
+    div total (scalar (float count))
   ;;
 
   let concatenate ?(axis = 0) xs =
     match xs with
     | [] -> Error.type_error "concatenate: no arrays"
-    | x :: _ -> bind1 (B.Concatenate (normalize_axis ~rank:(rank x) axis)) xs
+    | x :: _ ->
+      let axis = normalize_axis ~rank:(rank x) axis in
+      bind1 (B.Concatenate axis) xs
   ;;
 
   let slice ?(axis = 0) ~start ~stop x =
@@ -761,7 +785,7 @@ module Ops = struct
     | [] -> Error.type_error "stack: no arrays"
     | x :: _ ->
       let axis = normalize_axis ~rank:(rank x + 1) axis in
-      concatenate ~axis (List.map (expand_dims ~axes:[ axis ]) xs)
+      xs |> List.map (expand_dims ~axes:[ axis ]) |> concatenate ~axis
   ;;
 
   let dot x y =
@@ -771,9 +795,9 @@ module Ops = struct
     match sx, sy with
     | [| k |], [| k' |] when k = k' -> reduce_sum (mul x y)
     | [| m; k |], [| k' |] when k = k' ->
-      reshape ~shape:[| m |] (mm x (reshape ~shape:[| k; 1 |] y))
+      y |> reshape ~shape:[| k; 1 |] |> mm x |> reshape ~shape:[| m |]
     | [| k |], [| k'; n |] when k = k' ->
-      reshape ~shape:[| n |] (mm (reshape ~shape:[| 1; k |] x) y)
+      mm (reshape ~shape:[| 1; k |] x) y |> reshape ~shape:[| n |]
     | [| _; k |], [| k'; _ |] when k = k' -> mm x y
     | ([| _ |] | [| _; _ |]), ([| _ |] | [| _; _ |]) ->
       Error.type_error
@@ -788,19 +812,6 @@ module Ops = struct
   ;;
 
   let matmul = dot
-
-  module Infix = struct
-    let ( + ) = add
-    let ( - ) = sub
-    let ( * ) = mul
-    let ( / ) = div
-    let ( ~- ) = neg
-    let ( ** ) x p = pow ~exponent:p x
-    let ( > ) = greater
-    let ( < ) = less
-    let ( >= ) = greater_equal
-    let ( <= ) = less_equal
-  end
 
   include Infix
 end
@@ -870,8 +881,8 @@ module Tree = struct
     List.rev acc, s
   ;;
 
-  let leaves t x = fst (flatten t x)
-  let structure t x = snd (flatten t x)
+  let leaves t x = flatten t x |> fst
+  let structure t x = flatten t x |> snd
 
   let rec num_leaves = function
     | Leaf -> 1
@@ -883,14 +894,11 @@ module Tree = struct
   let rec unflat : type a. a t -> structure -> value list -> a * value list =
     fun t s leaves ->
     let many a ss leaves =
-      let rest, xs =
-        List.fold_left_map
-          (fun leaves s ->
-             let x, rest = unflat a s leaves in
-             rest, x)
-          leaves
-          ss
+      let step leaves s =
+        let x, rest = unflat a s leaves in
+        rest, x
       in
+      let rest, xs = List.fold_left_map step leaves ss in
       xs, rest
     in
     match t, s with
@@ -918,16 +926,16 @@ module Tree = struct
     let got = List.length leaves in
     if expected <> got
     then Error.type_error "Tree: expected %d leaves, got %d" expected got;
-    fst (unflat t s leaves)
+    unflat t s leaves |> fst
   ;;
 
   let flat_fn in_tree out_tree f s leaves =
-    flatten out_tree (f (unflatten in_tree s leaves))
+    unflatten in_tree s leaves |> f |> flatten out_tree
   ;;
 
   let map t f x =
     let leaves, s = flatten t x in
-    unflatten t s (List.map f leaves)
+    List.map f leaves |> unflatten t s
   ;;
 
   let map2 t f x y =
@@ -935,6 +943,6 @@ module Tree = struct
     let ys, s' = flatten t y in
     if not (equal_structure s s')
     then Error.type_error "Tree.map2: the two values have different structures";
-    unflatten t s (List.map2 f xs ys)
+    List.map2 f xs ys |> unflatten t s
   ;;
 end

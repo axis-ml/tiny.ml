@@ -4,6 +4,9 @@ module B = Ast_builder.Default
 let ops ~loc name = B.evar ~loc ("Tracer.Ops." ^ name)
 let app ~loc f args = B.eapply ~loc f args
 
+(* [call ~loc table key args] applies the Ops function [table] maps [key] to. *)
+let call ~loc table key args = app ~loc (ops ~loc (List.assoc key table)) args
+
 let binops =
   [ "+.", "add"
   ; "-.", "sub"
@@ -17,8 +20,7 @@ let binops =
 ;;
 
 let funcs =
-  List.concat_map
-    (fun n -> [ Lident n, n; Ldot (Lident "Float", n), n ])
+  let names =
     [ "sin"
     ; "cos"
     ; "tan"
@@ -32,6 +34,9 @@ let funcs =
     ; "acosh"
     ; "atanh"
     ]
+  in
+  let bare_and_float n = [ Lident n, n; Ldot (Lident "Float", n), n ] in
+  List.concat_map bare_and_float names
   @ [ Lident "abs_float", "abs"; Ldot (Lident "Float", "abs"), "abs" ]
 ;;
 
@@ -66,20 +71,18 @@ let rewrite e =
   | Pexp_apply
       ( { pexp_desc = Pexp_ident { txt = Lident op; _ }; _ }
       , [ (Nolabel, a); (Nolabel, b) ] )
-    when List.mem_assoc op binops ->
-    app ~loc (ops ~loc (List.assoc op binops)) [ lift a; lift b ]
+    when List.mem_assoc op binops -> call ~loc binops op [ lift a; lift b ]
   | Pexp_apply ({ pexp_desc = Pexp_ident { txt = Lident "~-."; _ }; _ }, [ (Nolabel, a) ])
     -> app ~loc (ops ~loc "neg") [ a ]
   | Pexp_apply
       ( { pexp_desc = Pexp_ident { txt = Lident ("float_of_int" | "float"); _ }; _ }
       , [ (Nolabel, n) ] ) -> [%expr Tracer.Ops.scalar (Stdlib.float_of_int [%e n])]
   | Pexp_apply ({ pexp_desc = Pexp_ident { txt = id; _ }; _ }, [ (Nolabel, a) ])
-    when List.mem_assoc id funcs -> app ~loc (ops ~loc (List.assoc id funcs)) [ lift a ]
+    when List.mem_assoc id funcs -> call ~loc funcs id [ lift a ]
   | Pexp_apply
       ( { pexp_desc = Pexp_ident { txt = Ldot (Lident "Float", n); _ }; _ }
       , [ (Nolabel, a); (Nolabel, b) ] )
-    when List.mem_assoc n float_binfuncs ->
-    app ~loc (ops ~loc (List.assoc n float_binfuncs)) [ lift a; lift b ]
+    when List.mem_assoc n float_binfuncs -> call ~loc float_binfuncs n [ lift a; lift b ]
   | Pexp_ident { txt = Lident op; loc } when List.mem op stdlib_kept ->
     B.pexp_ident ~loc { txt = Ldot (Lident "Stdlib", op); loc }
   | _ -> e
@@ -88,7 +91,7 @@ let rewrite e =
 let mapper =
   object
     inherit Ast_traverse.map as super
-    method! expression e = rewrite (super#expression e)
+    method! expression e = super#expression e |> rewrite
   end
 ;;
 
@@ -99,12 +102,10 @@ let region ~loc body =
       let open! Tracer.Ops in
       [%e body]]
   in
+  let silence_unused_open = PStr [ B.pstr_eval ~loc (B.estring ~loc "-33") [] ] in
   { e with
     pexp_attributes =
-      [ B.attribute
-          ~loc
-          ~name:{ txt = "ocaml.warning"; loc }
-          ~payload:(PStr [ B.pstr_eval ~loc (B.estring ~loc "-33") [] ])
+      [ B.attribute ~loc ~name:{ txt = "ocaml.warning"; loc } ~payload:silence_unused_open
       ]
   }
 ;;

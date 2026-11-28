@@ -89,13 +89,13 @@ module Ir = struct
       List.fold_left define defined e.outputs
     in
     let fold f xs env = List.fold_left f env xs in
+    let captures = List.map (fun (c, v) -> c, aval v) g.captures in
+    let consts = List.map (fun (c, a) -> c, Aval.of_ndarray a) g.consts in
     let defined =
       Env.empty
       |> fold define g.params
-      |> fold (define_holding "capture") (List.map (fun (c, v) -> c, aval v) g.captures)
-      |> fold
-           (define_holding "const")
-           (List.map (fun (c, a) -> c, Aval.of_ndarray a) g.consts)
+      |> fold (define_holding "capture") captures
+      |> fold (define_holding "const") consts
       |> fold check_eqn g.eqns
     in
     List.iter (use defined) g.outputs
@@ -103,7 +103,7 @@ module Ir = struct
 
   let invariant g =
     try check g with
-    | Bad msg -> failwith ("Ir.invariant: " ^ msg)
+    | Bad msg -> failwith @@ "Ir.invariant: " ^ msg
   ;;
 
   let trace_aux f in_avals =
@@ -127,23 +127,22 @@ module Ir = struct
     in
     let process self prim args =
       let inputs = List.map (var_of self) args in
-      let outputs = List.map fresh (Prim.abstract_eval prim (List.map aval args)) in
+      let outputs = args |> List.map aval |> Prim.abstract_eval prim |> List.map fresh in
       Tape.record eqns { prim; inputs; outputs };
       List.map (fun x -> tracer self x.aval x) outputs
     in
     let stage = create ~name:"stage" process in
     let params = List.map fresh in_avals in
     let outs, aux =
-      handle stage (fun () -> f (List.map (fun x -> tracer stage x.aval x) params))
+      handle stage (fun () -> List.map (fun x -> tracer stage x.aval x) params |> f)
     in
     let outputs = List.map (var_of stage) outs in
     let consts, captures =
-      List.partition_map
-        (fun (v, x) ->
-           match to_ndarray_opt v with
-           | Some a -> Either.Left (x, a)
-           | None -> Either.Right (x, v))
-        (Tape.to_list free)
+      Tape.to_list free
+      |> List.partition_map (fun (v, x) ->
+        match to_ndarray_opt v with
+        | Some a -> Either.Left (x, a)
+        | None -> Either.Right (x, v))
     in
     let g =
       { params
@@ -158,13 +157,12 @@ module Ir = struct
     g, aux
   ;;
 
-  let trace f in_avals = fst (trace_aux (fun xs -> f xs, ()) in_avals)
+  let trace f in_avals = trace_aux (fun xs -> f xs, ()) in_avals |> fst
 
   let make_tree ~input:in_tree ~output:out_tree f x =
     let leaves, s = Tree.flatten in_tree x in
-    trace
-      (fun tracers -> fst (Tree.flat_fn in_tree out_tree f s tracers))
-      (List.map aval leaves)
+    List.map aval leaves
+    |> trace (fun tracers -> Tree.flat_fn in_tree out_tree f s tracers |> fst)
   ;;
 
   let make f x = make_tree ~input:Tree.value ~output:Tree.value f x
@@ -190,47 +188,45 @@ module Ir = struct
               as an argument instead"
              (describe v))
       g.captures;
-    List.iteri
-      (fun i ((p : var), x) ->
-         if not (Aval.equal (aval x) p.aval)
-         then
-           Error.type_error
-             "Ir.run: input %d is %s, expected %s"
-             i
-             (Aval.to_string (aval x))
-             (Aval.to_string p.aval))
-      (List.combine g.params xs)
+    List.combine g.params xs
+    |> List.iteri (fun i ((p : var), x) ->
+      if not (Aval.equal (aval x) p.aval)
+      then
+        Error.type_error
+          "Ir.run: input %d is %s, expected %s"
+          i
+          (Aval.to_string (aval x))
+          (Aval.to_string p.aval))
   ;;
 
   let read env (x : var) =
     match Env.find_opt x.id env with
     | Some v -> v
-    | None ->
-      invalid_arg (Printf.sprintf "Ir.run: %%%d is used before it is defined" x.id)
+    | None -> Printf.ksprintf invalid_arg "Ir.run: %%%d is used before it is defined" x.id
   ;;
 
   let run_eqn env (e : eqn) =
-    let outs = bind e.prim (List.map (read env) e.inputs) in
+    let outs = List.map (read env) e.inputs |> bind e.prim in
     if List.length outs <> List.length e.outputs
     then
-      invalid_arg
-        (Printf.sprintf
-           "Ir.run: %s gave %d outputs, the eqn has %d"
-           (Prim.name e.prim)
-           (List.length outs)
-           (List.length e.outputs));
+      Printf.ksprintf
+        invalid_arg
+        "Ir.run: %s gave %d outputs, the eqn has %d"
+        (Prim.name e.prim)
+        (List.length outs)
+        (List.length e.outputs);
     Env.add_all (ids e.outputs) outs env
   ;;
 
   let run g xs =
     check_run_inputs g xs;
+    let capture_vars, captured = List.split g.captures in
+    let const_vars, consts = List.split g.consts in
     let env =
       Env.empty
       |> Env.add_all (ids g.params) xs
-      |> Env.add_all (ids (List.map fst g.captures)) (List.map snd g.captures)
-      |> Env.add_all
-           (ids (List.map fst g.consts))
-           (List.map (fun (_, a) -> of_ndarray a) g.consts)
+      |> Env.add_all (ids capture_vars) captured
+      |> Env.add_all (ids const_vars) (List.map of_ndarray consts)
     in
     let env = List.fold_left run_eqn env g.eqns in
     List.map (read env) g.outputs
@@ -243,13 +239,10 @@ module Ir = struct
   ;;
 
   let producers g =
-    let defs =
-      List.fold_left
-        (fun defs (e : eqn) ->
-           List.fold_left (fun defs x -> Env.add x.id e defs) defs e.outputs)
-        Env.empty
-        g.eqns
+    let define defs (e : eqn) =
+      List.fold_left (fun defs x -> Env.add x.id e defs) defs e.outputs
     in
+    let defs = List.fold_left define Env.empty g.eqns in
     Array.init g.num_vars (fun id -> Env.find_opt id defs)
   ;;
 
@@ -259,14 +252,11 @@ module Ir = struct
       | Some es when List.memq e es -> Some es
       | Some es -> Some (e :: es)
     in
-    let uses =
-      List.fold_left
-        (fun uses (e : eqn) ->
-           List.fold_left (fun uses x -> Env.update x.id (add_user e) uses) uses e.inputs)
-        Env.empty
-        (List.rev g.eqns)
+    let use uses (e : eqn) =
+      List.fold_left (fun uses x -> Env.update x.id (add_user e) uses) uses e.inputs
     in
-    Array.init g.num_vars (fun id -> Option.value (Env.find_opt id uses) ~default:[])
+    let uses = List.rev g.eqns |> List.fold_left use Env.empty in
+    Array.init g.num_vars (fun id -> Env.find_opt id uses |> Option.value ~default:[])
   ;;
 
   let live_mask g =
@@ -280,26 +270,27 @@ module Ir = struct
   let dead g = Lists.reject (live_mask g) g.eqns
   let name x = Printf.sprintf "%%%d" x.id
   let typed x = name x ^ ":" ^ Aval.to_string x.aval
-  let names xs = String.concat ", " (List.map name xs)
+  let names xs = List.map name xs |> String.concat ", "
+  let typed_names xs = List.map typed xs |> String.concat ", "
 
   let rec lines indent g =
     let line s = indent ^ s in
+    let sub_lines (n, sub) = line ("  " ^ n ^ ":") :: lines (indent ^ "    ") sub in
     let eqn_lines (e : eqn) =
-      line
-        (Printf.sprintf
-           "%s = %s(%s)"
-           (String.concat ", " (List.map typed e.outputs))
-           (Prim.name e.prim)
-           (names e.inputs))
-      :: List.concat_map
-           (fun (n, sub) -> line ("  " ^ n ^ ":") :: lines (indent ^ "    ") sub)
-           (sub_graphs e.prim)
+      let head =
+        Printf.sprintf
+          "%s = %s(%s)"
+          (typed_names e.outputs)
+          (Prim.name e.prim)
+          (names e.inputs)
+      in
+      line head :: List.concat_map sub_lines (sub_graphs e.prim)
     in
-    [ line ("params: " ^ String.concat ", " (List.map typed g.params)) ]
-    @ List.map (fun (c, v) -> line (typed c ^ " = capture " ^ describe v)) g.captures
-    @ List.map
-        (fun (c, a) -> line (typed c ^ " = const " ^ Ops.to_string (of_ndarray a)))
-        g.consts
+    let capture (c, v) = line (typed c ^ " = capture " ^ describe v) in
+    let const (c, a) = line (typed c ^ " = const " ^ Ndarray.to_string a) in
+    [ line ("params: " ^ typed_names g.params) ]
+    @ List.map capture g.captures
+    @ List.map const g.consts
     @ List.concat_map eqn_lines g.eqns
     @ [ line ("outputs: " ^ names g.outputs) ]
   ;;
@@ -344,43 +335,39 @@ module Ir = struct
       in
       let ins = List.map (fun x -> edge (source src x) n x) e.inputs in
       let src = List.fold_left (fun src (x : var) -> Env.add x.id n src) src e.outputs in
-      let clusters, subs =
-        List.fold_left_map
-          (fun clusters (sub_name, sub) ->
-             let k' = clusters + 1 in
-             let body, clusters = dot_lines k' k' sub in
-             ( clusters
-             , [ sp
-                   "  subgraph cluster_%d {\n  label=\"%s.%s\"; style=dotted;\n"
-                   k'
-                   (escape (Prim.name e.prim))
-                   (escape sub_name)
-               ]
-               @ body
-               @ [ "  }\n"; sp "  g%d_out -> %s [style=dotted];\n" k' n ] ))
-          clusters
-          (sub_graphs e.prim)
+      let cluster clusters (sub_name, sub) =
+        let k' = clusters + 1 in
+        let body, clusters = dot_lines k' k' sub in
+        let header =
+          sp
+            "  subgraph cluster_%d {\n  label=\"%s.%s\"; style=dotted;\n"
+            k'
+            (escape (Prim.name e.prim))
+            (escape sub_name)
+        in
+        let footer = [ "  }\n"; sp "  g%d_out -> %s [style=dotted];\n" k' n ] in
+        clusters, (header :: body) @ footer
       in
+      let clusters, subs = sub_graphs e.prim |> List.fold_left_map cluster clusters in
       (src, clusters), (box :: ins) @ List.concat subs
     in
     let (src, clusters), eqns =
-      List.fold_left_map
-        eqn_lines
-        (src, clusters)
-        (List.mapi (fun i x -> i, x) (List.combine (live_mask g) g.eqns))
+      List.combine (live_mask g) g.eqns
+      |> List.mapi (fun i x -> i, x)
+      |> List.fold_left_map eqn_lines (src, clusters)
     in
     let out = node "out" in
-    ( (List.map snd leaves @ List.concat eqns)
-      @ (sp "  %s [shape=plaintext label=\"outputs\"];\n" out
-         :: List.map (fun x -> edge (source src x) out x) g.outputs)
-    , clusters )
+    let out_lines =
+      sp "  %s [shape=plaintext label=\"outputs\"];\n" out
+      :: List.map (fun x -> edge (source src x) out x) g.outputs
+    in
+    List.map snd leaves @ List.concat eqns @ out_lines, clusters
   ;;
 
   let to_dot g =
     let body, _ = dot_lines 0 0 g in
-    String.concat
-      ""
-      (("digraph ir {\n  node [fontname=\"monospace\"];\n" :: body) @ [ "}\n" ])
+    ("digraph ir {\n  node [fontname=\"monospace\"];\n" :: body) @ [ "}\n" ]
+    |> String.concat ""
   ;;
 
   module Unchecked = struct
@@ -401,7 +388,7 @@ module Util = struct
   let reject = Lists.reject
   let merge = Lists.merge
   let avals = List.map aval
-  let avals_str l = String.concat ", " (List.map Aval.to_string l)
+  let avals_str l = List.map Aval.to_string l |> String.concat ", "
   let nonzero = List.map Autodiff.Maybe_zero.nonzero
   let instantiate = List.map Autodiff.Maybe_zero.instantiate
   let zero_like = List.map Autodiff.Maybe_zero.zero_like
@@ -414,13 +401,13 @@ module Util = struct
     | _ -> failwith "Staging: a rule's graph captured a tracer"
   ;;
 
-  let traced f in_avals = fst (traced_aux (fun xs -> f xs, ()) in_avals)
+  let traced f in_avals = traced_aux (fun xs -> f xs, ()) in_avals |> fst
 
   let empty =
     { Ir.params = []; captures = []; consts = []; eqns = []; outputs = []; num_vars = 0 }
   ;;
 
-  let run_arrays g arrays = List.map to_ndarray (Ir.run g (List.map of_ndarray arrays))
+  let run_arrays g arrays = List.map of_ndarray arrays |> Ir.run g |> List.map to_ndarray
   let as_fn g xs = Ir.run g xs, ()
 
   let expect what ~graph ~operands =
@@ -455,12 +442,8 @@ module Util = struct
   ;;
 
   let transposed (g : Ir.t) ops fixed cts =
-    let ops =
-      merge
-        (List.map is_linear ops)
-        (List.filter is_linear ops)
-        (List.map (fun v -> Autodiff.Linear.Fixed v) fixed)
-    in
+    let fixed = List.map (fun v -> Autodiff.Linear.Fixed v) fixed in
+    let ops = merge (List.map is_linear ops) (List.filter is_linear ops) fixed in
     let lin, () = Autodiff.Partial_eval.trace (as_fn g) ops in
     Autodiff.Transpose.transpose lin cts
   ;;
@@ -512,19 +495,19 @@ module Compile = struct
       let in_mask = is_nonzero dxs in
       let ts = instantiate (pick in_mask dxs) in
       let jvp_graph, out_mask =
-        traced_aux
-          (fun l ->
-             let xs, ts = split (List.length xs) l in
-             let dxs = merge in_mask (nonzero ts) (reject in_mask dxs) in
-             let ys, dys, () = Jvp.jvp_flat (as_fn g) xs dxs in
-             let out_mask = is_nonzero dys in
-             ys @ instantiate (pick out_mask dys), out_mask)
-          (avals xs @ avals ts)
+        avals xs @ avals ts
+        |> traced_aux (fun l ->
+          let xs, ts = split (List.length xs) l in
+          let dxs = merge in_mask (nonzero ts) (reject in_mask dxs) in
+          let ys, dys, () = Jvp.jvp_flat (as_fn g) xs dxs in
+          let out_mask = is_nonzero dys in
+          ys @ instantiate (pick out_mask dys), out_mask)
       in
       let ys, dys =
-        split (List.length g.outputs) (call (wrap "jvp" name) jvp_graph (xs @ ts))
+        call (wrap "jvp" name) jvp_graph (xs @ ts) |> split (List.length g.outputs)
       in
-      ys, merge out_mask (nonzero dys) (zero_like (reject out_mask ys))
+      let zeros = reject out_mask ys |> zero_like in
+      ys, merge out_mask (nonzero dys) zeros
     | _ -> Prim.arity_error p ~expected:0 xs
   ;;
 
@@ -538,10 +521,11 @@ module Compile = struct
     in
     let ids = List.map (fun (x : Linear.var) -> x.id) in
     let run_eqn env (e : Linear.eqn) =
-      Env.add_all (ids e.outputs) (bind e.prim (List.map (read env) e.inputs)) env
+      let outs = List.map (read env) e.inputs |> bind e.prim in
+      Env.add_all (ids e.outputs) outs env
     in
     let env = Env.add_all (ids lin.inputs) inputs Env.empty in
-    read (List.fold_left run_eqn env lin.eqns)
+    List.fold_left run_eqn env lin.eqns |> read
   ;;
 
   let residuals (lin : Linear.t) =
@@ -573,38 +557,34 @@ module Compile = struct
     match p with
     | Call { name; graph = g } ->
       let unknown = List.map not known in
-      let unknown_avals = avals (pick unknown xs) in
+      let unknown_avals = pick unknown xs |> avals in
       let known_graph, (lin, res) =
-        traced_aux
-          (fun kxs ->
-             let ops =
-               merge
-                 known
-                 (List.map (fun v -> Linear.Fixed v) kxs)
-                 (List.map (fun a -> Linear.Linear a) unknown_avals)
-             in
-             let lin, () = Partial_eval.trace (as_fn g) ops in
-             let res = residuals lin in
-             known_values lin.outputs @ res, (lin, res))
-          (avals (pick known xs))
+        pick known xs
+        |> avals
+        |> traced_aux (fun kxs ->
+          let fixed = List.map (fun v -> Linear.Fixed v) kxs in
+          let linear = List.map (fun a -> Linear.Linear a) unknown_avals in
+          let lin, () = merge known fixed linear |> Partial_eval.trace (as_fn g) in
+          let res = residuals lin in
+          known_values lin.outputs @ res, (lin, res))
       in
       let ys, rs =
-        split
-          (List.length known_graph.outputs - List.length res)
-          (call (wrap "known" name) known_graph (pick known xs))
+        call (wrap "known" name) known_graph (pick known xs)
+        |> split (List.length known_graph.outputs - List.length res)
       in
       let out_unknown = List.map is_unknown lin.outputs in
       let unknown_part l =
         let rs, us = split (List.length res) l in
         let env = List.combine res rs in
-        let known v = Option.value (List.assq_opt v env) ~default:v in
-        List.map (run_linear lin ~known us) (pick out_unknown lin.outputs)
+        let known v = List.assq_opt v env |> Option.value ~default:v in
+        pick out_unknown lin.outputs |> List.map (run_linear lin ~known us)
       in
       let dys =
         if List.exists Fun.id out_unknown
         then (
-          let ug = traced unknown_part (avals rs @ unknown_avals) in
-          stage (Call { name = wrap "unknown" name; graph = ug }) (rs @ pick unknown xs))
+          let ug = avals rs @ unknown_avals |> traced unknown_part in
+          let name = wrap "unknown" name in
+          stage (Call { name; graph = ug }) (rs @ pick unknown xs))
         else []
       in
       merge out_unknown dys ys
@@ -617,16 +597,13 @@ module Compile = struct
       let fixed = fixed_values operands in
       let cts = instantiate cts in
       let back =
-        traced
-          (fun l ->
-             let fs, cts = split (List.length fixed) l in
-             transposed g operands fs cts)
-          (avals fixed @ avals cts)
+        avals fixed @ avals cts
+        |> traced (fun l ->
+          let fs, cts = split (List.length fixed) l in
+          transposed g operands fs cts)
       in
-      merge
-        (List.map is_linear operands)
-        (nonzero (call (wrap "transpose" name) back (fixed @ cts)))
-        (zero_like fixed)
+      let linear_cts = call (wrap "transpose" name) back (fixed @ cts) |> nonzero in
+      merge (List.map is_linear operands) linear_cts (zero_like fixed)
     | _ -> Error.type_error "transpose of %s: not a call" (Prim.name p)
   ;;
 
@@ -684,7 +661,7 @@ module Compile = struct
       match Hashtbl.find_opt instances s with
       | Some c -> c
       | None ->
-        let c = B.compile (Tree.flat_fn in_tree out_tree f s) in
+        let c = Tree.flat_fn in_tree out_tree f s |> B.compile in
         Hashtbl.add instances s c;
         c
     in
@@ -693,12 +670,12 @@ module Compile = struct
       let ys, out = instance s xs in
       if List.length ys <> Tree.num_leaves out
       then
-        invalid_arg
-          (Printf.sprintf
-             "Compile: backend %s returned %d leaves, the output has %d"
-             B.name
-             (List.length ys)
-             (Tree.num_leaves out));
+        Printf.ksprintf
+          invalid_arg
+          "Compile: backend %s returned %d leaves, the output has %d"
+          B.name
+          (List.length ys)
+          (Tree.num_leaves out);
       Tree.unflatten out_tree out ys
   ;;
 
@@ -732,7 +709,7 @@ module Control = struct
     g, captured, aux
   ;;
 
-  let closed f in_avals = Ir.closure_convert (Ir.trace f in_avals)
+  let closed f in_avals = Ir.trace f in_avals |> Ir.closure_convert
   let split_branches (then_ : Ir.t) rest = split (List.length then_.params) rest
 
   let cond_abstract_eval p avals =
@@ -771,12 +748,11 @@ module Control = struct
 
   let jvp_graph (g : Ir.t) =
     let a = Ir.avals g.params in
-    traced
-      (fun l ->
-         let xs, dxs = split (List.length a) l in
-         let ys, dys, () = Jvp.jvp_flat (as_fn g) xs (nonzero dxs) in
-         ys @ instantiate dys)
-      (a @ a)
+    a @ a
+    |> traced (fun l ->
+      let xs, dxs = split (List.length a) l in
+      let ys, dys, () = Jvp.jvp_flat (as_fn g) xs (nonzero dxs) in
+      ys @ instantiate dys)
   ;;
 
   let cond_jvp p xs dxs =
@@ -795,46 +771,46 @@ module Control = struct
   ;;
 
   let rec unknown_outputs (g : Ir.t) known =
-    let unknown env (x : Ir.var) = Option.value (Env.find_opt x.id env) ~default:false in
+    let unknown env (x : Ir.var) = Env.find_opt x.id env |> Option.value ~default:false in
     let step env (e : Ir.eqn) =
       let ins = List.map (unknown env) e.inputs in
       let outs =
         match e.prim, ins with
         | Cond { then_; else_ }, false :: rest ->
           let ut, ue = split_branches then_ rest in
-          List.map2
-            ( || )
-            (unknown_outputs then_ (List.map not ut))
-            (unknown_outputs else_ (List.map not ue))
+          let then_unknown = unknown_outputs then_ (List.map not ut) in
+          let else_unknown = unknown_outputs else_ (List.map not ue) in
+          List.map2 ( || ) then_unknown else_unknown
         | Compile.Call { graph; _ }, ins -> unknown_outputs graph (List.map not ins)
         | _ -> List.map (fun _ -> List.exists Fun.id ins) e.outputs
       in
       Env.add_all (Ir.ids e.outputs) outs env
     in
     let params = Env.add_all (Ir.ids g.params) (List.map not known) Env.empty in
-    List.map (unknown (List.fold_left step params g.eqns)) g.outputs
+    let env = List.fold_left step params g.eqns in
+    List.map (unknown env) g.outputs
   ;;
 
   let restrict (g : Ir.t) ~outputs =
     let g = { g with outputs = pick outputs g.outputs } in
-    traced (Ir.run { g with eqns = pick (Ir.live_mask g) g.eqns }) (Ir.avals g.params)
+    let live = { g with eqns = pick (Ir.live_mask g) g.eqns } in
+    Ir.avals g.params |> traced (Ir.run live)
   ;;
 
   let known_part (g : Ir.t) ~known ~outputs =
     let g = restrict g ~outputs in
-    traced
-      (fun xs ->
-         let unknown =
-           List.map (fun a -> Linear.Linear a) (Ir.avals (reject known g.params))
-         in
-         let ops = merge known (List.map (fun v -> Linear.Fixed v) xs) unknown in
-         let lin, () = Partial_eval.trace (as_fn g) ops in
-         List.map
-           (function
-             | Linear.Known v -> v
-             | Linear.Var _ -> failwith "Control: a known output of a cond is unknown")
-           lin.outputs)
-      (Ir.avals (pick known g.params))
+    pick known g.params
+    |> Ir.avals
+    |> traced (fun xs ->
+      let unknown =
+        reject known g.params |> Ir.avals |> List.map (fun a -> Linear.Linear a)
+      in
+      let ops = merge known (List.map (fun v -> Linear.Fixed v) xs) unknown in
+      let lin, () = Partial_eval.trace (as_fn g) ops in
+      lin.outputs
+      |> List.map (function
+        | Linear.Known v -> v
+        | Linear.Var _ -> failwith "Control: a known output of a cond is unknown"))
   ;;
 
   let cond_partial_eval ~stage p xs ~known =
@@ -879,11 +855,10 @@ module Control = struct
       let cts = instantiate cts in
       let back (g : Ir.t) ops ~before ~after =
         let fixed = fixed_values ops in
-        traced
-          (fun l ->
-             let fs, cts = split (List.length fixed) l in
-             zeros before @ transposed g ops fs cts @ zeros after)
-          (avals fixed @ avals cts)
+        avals fixed @ avals cts
+        |> traced (fun l ->
+          let fs, cts = split (List.length fixed) l in
+          zeros before @ transposed g ops fs cts @ zeros after)
       in
       let outs =
         bind
@@ -893,8 +868,10 @@ module Control = struct
              })
           ((pred :: (fixed_values ot @ cts)) @ fixed_values oe @ cts)
       in
-      Z.zero_like pred
-      :: merge (List.map is_linear rest) (nonzero outs) (zero_like (fixed_values rest))
+      let operand_cts =
+        merge (List.map is_linear rest) (nonzero outs) (zero_like (fixed_values rest))
+      in
+      Z.zero_like pred :: operand_cts
     | _ -> Error.type_error "transpose of cond: the predicate is not fixed"
   ;;
 
@@ -929,11 +906,12 @@ module Control = struct
        | [ a ] when is_scalar a -> ()
        | l ->
          Error.type_error "while_loop: cond must return a scalar, got (%s)" (avals_str l));
-      if not (List.equal Aval.equal (Ir.avals body.outputs) carry)
+      let returned = Ir.avals body.outputs in
+      if not (List.equal Aval.equal returned carry)
       then
         Error.type_error
           "while_loop: body returns (%s) for a carry of (%s)"
-          (avals_str (Ir.avals body.outputs))
+          (avals_str returned)
           (avals_str carry);
       carry
     | _ -> Prim.arity_error p ~expected:0 avals
@@ -945,7 +923,7 @@ module Control = struct
       let ac, ab, carry = split_while cond body arrays in
       let rec loop carry =
         match run_arrays cond (ac @ carry) with
-        | [ c ] when Ndarray.to_float c > 0. -> loop (run_arrays body (ab @ carry))
+        | [ c ] when Ndarray.to_float c > 0. -> run_arrays body (ab @ carry) |> loop
         | _ -> carry
       in
       loop carry
@@ -960,24 +938,21 @@ module Control = struct
       let _, dab, dcarry = split_while cond body dxs in
       let ca = avals carry in
       let cond' =
-        traced
-          (fun l ->
-             let ac, l = split nc l in
-             let carry, _ = split n l in
-             Ir.run cond (ac @ carry))
-          (avals ac @ ca @ ca)
+        avals ac @ ca @ ca
+        |> traced (fun l ->
+          let ac, l = split nc l in
+          let carry, _ = split n l in
+          Ir.run cond (ac @ carry))
       in
       let body' =
-        traced
-          (fun l ->
-             let ab, l = split nb l in
-             let dab, l = split nb l in
-             let carry, dcarry = split n l in
-             let ys, dys, () =
-               Jvp.jvp_flat (as_fn body) (ab @ carry) (nonzero (dab @ dcarry))
-             in
-             ys @ instantiate dys)
-          (avals ab @ avals ab @ ca @ ca)
+        avals ab @ avals ab @ ca @ ca
+        |> traced (fun l ->
+          let ab, l = split nb l in
+          let dab, l = split nb l in
+          let carry, dcarry = split n l in
+          let dxs = nonzero (dab @ dcarry) in
+          let ys, dys, () = Jvp.jvp_flat (as_fn body) (ab @ carry) dxs in
+          ys @ instantiate dys)
       in
       let outs =
         bind
@@ -1024,10 +999,8 @@ module Control = struct
     and ge, ce, out_e = branch else_ in
     if not (Tree.equal_structure out_t out_e)
     then Error.type_error "cond: the branches return different structures";
-    Tree.unflatten
-      out_tree
-      out_t
-      (bind (Cond { then_ = gt; else_ = ge }) ((pred :: (ct @ xs)) @ ce @ xs))
+    bind (Cond { then_ = gt; else_ = ge }) ((pred :: (ct @ xs)) @ ce @ xs)
+    |> Tree.unflatten out_tree out_t
   ;;
 
   let cond pred ~then_ ~else_ x =
@@ -1043,9 +1016,11 @@ module Control = struct
       then Error.type_error "while_loop: body changed the structure of the carry";
       ys
     in
-    let gc, cc = closed (fun leaves -> [ cond (of_leaves leaves) ]) (avals xs) in
-    let gb, bc = closed (fun leaves -> to_leaves (body (of_leaves leaves))) (avals xs) in
-    of_leaves (bind (While { cond = gc; body = gb }) (cc @ bc @ xs))
+    let gc, cc = avals xs |> closed (fun leaves -> [ of_leaves leaves |> cond ]) in
+    let gb, bc =
+      avals xs |> closed (fun leaves -> of_leaves leaves |> body |> to_leaves)
+    in
+    bind (While { cond = gc; body = gb }) (cc @ bc @ xs) |> of_leaves
   ;;
 
   let while_loop ~cond ~body x = while_loop_tree ~carry:Tree.value ~cond ~body x
