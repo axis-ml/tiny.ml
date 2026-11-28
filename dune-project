@@ -8,7 +8,7 @@
  (enabled_for ocaml dune))
 
 (source
- (github Ashirog1/tiny.ml))
+ (github axis-ml/tiny.ml))
 
 (authors "Quoc Nguyen" "tu-hm")
 

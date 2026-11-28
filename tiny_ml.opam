@@ -6,8 +6,8 @@ description:
 maintainer: ["Quoc Nguyen" "tu-hm"]
 authors: ["Quoc Nguyen" "tu-hm"]
 license: "MIT"
-homepage: "https://github.com/Ashirog1/tiny.ml"
-bug-reports: "https://github.com/Ashirog1/tiny.ml/issues"
+homepage: "https://github.com/axis-ml/tiny.ml"
+bug-reports: "https://github.com/axis-ml/tiny.ml/issues"
 depends: [
   "dune" {>= "3.24"}
   "ocaml" {>= "5.0"}
@@ -30,5 +30,5 @@ build: [
     "@doc" {with-doc}
   ]
 ]
-dev-repo: "git+https://github.com/Ashirog1/tiny.ml.git"
+dev-repo: "git+https://github.com/axis-ml/tiny.ml.git"
 x-maintenance-intent: ["(latest)"]
