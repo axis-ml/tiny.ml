@@ -4,11 +4,11 @@ let s = Ops.scalar
 let branchy x = if Float.compare (Ops.to_float x) 0. > 0 then Ops.sin x else Ops.cos x
 
 let () =
-  Check.value "grad branch, x = 1" ~expected:(s (cos 1.)) (Ad.grad1 branchy (s 1.));
+  Check.value "grad branch, x = 1" ~expected:(s (cos 1.)) (Ad.grad branchy (s 1.));
   Check.value
     "grad branch, x = -1"
     ~expected:(s (-.sin (-1.)))
-    (Ad.grad1 branchy (s (-1.)));
+    (Ad.grad branchy (s (-1.)));
   Check.value "deriv branch, x = 1" ~expected:(s (cos 1.)) (Ad.deriv branchy (s 1.));
   Check.value
     "deriv branch, x = -1"
@@ -17,19 +17,19 @@ let () =
   Check.value
     "grad (grad branch), x = 1"
     ~expected:(s (-.sin 1.))
-    (Ad.grad1 (Ad.grad1 branchy) (s 1.));
+    (Ad.grad (Ad.grad branchy) (s 1.));
   Check.value
     "grad (grad branch), x = -1"
     ~expected:(s (-.cos (-1.)))
-    (Ad.grad1 (Ad.grad1 branchy) (s (-1.)));
+    (Ad.grad (Ad.grad branchy) (s (-1.)));
   Check.value
     "deriv (grad branch), x = -1"
     ~expected:(s (-.cos (-1.)))
-    (Ad.deriv (Ad.grad1 branchy) (s (-1.)));
+    (Ad.deriv (Ad.grad branchy) (s (-1.)));
   Check.value
     "grad (deriv branch), x = 1"
     ~expected:(s (-.sin 1.))
-    (Ad.grad1 (Ad.deriv branchy) (s 1.))
+    (Ad.grad (Ad.deriv branchy) (s 1.))
 ;;
 
 let () =
@@ -42,7 +42,7 @@ let () =
   Check.value
     "grad of a data-dependent loop, x = 3"
     ~expected:(s 4.)
-    (Ad.grad1 grow (s 3.));
+    (Ad.grad grow (s 3.));
   Check.value
     "deriv of a data-dependent loop, x = 0.5"
     ~expected:(s 32.)
@@ -59,27 +59,25 @@ let () =
   Check.value
     "grad after reads"
     ~expected:(Ops.array [| cos 1.; cos 2. |])
-    (Ad.grad Tree.value f (Ops.array [| 1.; 2. |]))
+    (Ad.grad_tree ~wrt:Tree.value f (Ops.array [| 1.; 2. |]))
 ;;
 
 let () =
   Check.value
     "eager compile branches"
     ~expected:(s (sin 1.))
-    (Compile.compile1 ~backend:Compile.eager branchy (s 1.));
+    (Compile.compile ~backend:Compile.eager branchy (s 1.));
   Check.raises ~matches:Check.is_concretization "jit cannot branch on data" (fun () ->
-    Compile.compile1 ~backend:Compile.jit branchy (s 1.));
-  Check.raises
-    ~matches:Check.is_concretization
-    "Ir.make1 cannot branch on data"
-    (fun () -> Ir.make1 branchy (s 1.));
+    Compile.compile ~backend:Compile.jit branchy (s 1.));
+  Check.raises ~matches:Check.is_concretization "Ir.make cannot branch on data" (fun () ->
+    Ir.make branchy (s 1.));
   Check.value
     "trace inside deriv reads the outer primal"
     ~expected:(s 2.)
     (Ad.deriv
        (fun y ->
           let k = Ops.to_float y in
-          Ir.run1 (Ir.make1 (fun x -> Ops.(x * y * scalar (k /. k))) (s 0.)) (s 2.))
+          Ir.run1 (Ir.make (fun x -> Ops.(x * y * scalar (k /. k))) (s 0.)) (s 2.))
        (s 5.))
 ;;
 
@@ -95,18 +93,18 @@ let () =
   Check.raises ~matches:Check.is_escaped "leaked jvp tracer cannot be read" (fun () ->
     Ops.to_float (leak (fun f -> Ad.deriv f (s 1.))));
   Check.raises ~matches:Check.is_escaped "leaked vjp tracer cannot be read" (fun () ->
-    Ops.to_float (leak (fun f -> Ad.grad1 f (s 1.))));
+    Ops.to_float (leak (fun f -> Ad.grad f (s 1.))));
   Check.raises ~matches:Check.is_escaped "leaked stage tracer cannot be read" (fun () ->
-    Ops.to_float (leak (fun f -> Ir.run1 (Ir.make1 f (s 1.)) (s 1.))))
+    Ops.to_float (leak (fun f -> Ir.run1 (Ir.make f (s 1.)) (s 1.))))
 ;;
 
 let () =
-  match Ir.make1 branchy (s 1.) with
-  | _ -> Check.bool "concretization message" false
-  | exception Concretization_error msg ->
+  match catch (fun () -> Ir.make branchy (s 1.)) with
+  | Error (Concretization_error msg) ->
     Check.bool
       "concretization message names the stage tracer"
       (String.length msg > 0 && String.sub msg 0 5 = "stage")
+  | Ok _ | Error _ -> Check.bool "concretization message" false
 ;;
 
 let () = Check.finish ()

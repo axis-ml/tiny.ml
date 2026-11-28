@@ -10,21 +10,21 @@ module Maybe_zero : sig
     | Nonzero of value
 
   val zero_like : value -> t
+  val nonzero : value -> t
   val is_zero : t -> bool
   val instantiate : t -> value
 
-  (** A zero stays a zero of [out]'s type. *)
-  val map : value -> (value -> value) -> t -> t
+  (** Zeros stay zero, typed like [like]. *)
+  val map : like:value -> (value -> value) -> t -> t
 
-  val add : value -> t -> t -> t
-  val sub : value -> t -> t -> t
+  val add : like:value -> t -> t -> t
+  val sub : like:value -> t -> t -> t
 end
 
 module Jvp : sig
   type value := Interp.value
 
-  (** Gets primals and tangents, returns primal outputs and tangents. At
-      least one input tangent is non-zero. *)
+  (** Primals and tangents (not all zero) to outputs and tangents. *)
   type rule = Prim.t -> value list -> Maybe_zero.t list -> value list * Maybe_zero.t list
 
   val register_rule : Prim.t -> rule -> unit
@@ -37,73 +37,145 @@ module Jvp : sig
     -> value list * Maybe_zero.t list * 'aux
 end
 
-module Vjp : sig
+(** A linear function as data. *)
+module Linear : sig
   type value := Interp.value
 
-  (** [rule p xs ys] runs when the op is recorded and returns the backward
-      function, kept on the tape: capture only the residuals it needs. *)
-  type rule = Prim.t -> value list -> value list -> Maybe_zero.t list -> Maybe_zero.t list
+  type var = private
+    { id : int
+    ; aval : Aval.t
+    }
+
+  (** [Known]: residuals. *)
+  type atom =
+    | Var of var
+    | Known of value
+
+  type eqn = private
+    { prim : Prim.t
+    ; inputs : atom list
+    ; outputs : var list
+    }
+
+  (** [eqns] in eval order, all live; ids [< num_vars]. *)
+  type t = private
+    { inputs : var list
+    ; eqns : eqn list
+    ; outputs : atom list
+    ; num_vars : int
+    }
+
+  type operand =
+    | Linear of Aval.t
+    | Fixed of value
+end
+
+(** Runs known ops, records unknown ones. *)
+module Partial_eval : sig
+  type value := Interp.value
+
+  (** For mixed operands: [bind] the known part, [stage] the rest. Default:
+      stage everything. *)
+  type rule =
+    stage:(Prim.t -> value list -> value list)
+    -> Prim.t
+    -> value list
+    -> known:bool list
+    -> value list
+
+  val register_rule : Prim.t -> rule -> unit
+
+  (** [Linear]: unknown, [Fixed]: known. *)
+  val trace : (value list -> value list * 'aux) -> Linear.operand list -> Linear.t * 'aux
+end
+
+(** Only linear primitives need a rule. *)
+module Transpose : sig
+  type value := Interp.value
+
+  (** Output cotangents (not all zero) to operand ones; [Zero] for [Fixed]. *)
+  type rule = Prim.t -> Linear.operand list -> Maybe_zero.t list -> Maybe_zero.t list
 
   val register_rule : Prim.t -> rule -> unit
   val missing_rules : unit -> string list
 
-  (** Returns the outputs, the extra result, and a reusable [back]. *)
+  (** Output cotangents to input ones. *)
+  val transpose : Linear.t -> value list -> value list
+end
+
+(** jvp + partial eval + transpose. Needs a jvp rule, and a transpose
+    rule if the tangent uses the primitive. *)
+module Vjp : sig
+  type value := Interp.value
+
+  (** Outputs, aux, and the jvp as a linear function. *)
+  val linearize
+    :  (value list -> value list * 'aux)
+    -> value list
+    -> value list * 'aux * Linear.t
+
+  (** Outputs, aux, and a reusable [back]. *)
   val vjp_flat
     :  (value list -> value list * 'aux)
     -> value list
     -> value list * 'aux * (value list -> value list)
 end
 
-(** Jvp and vjp rules generated from one declaration. *)
+(** Jvp and transpose rules from one declaration. *)
 module Derivatives : sig
   type value := Interp.value
 
-  (** For each operand, [Some f] with [f t = t * dy/dx_i], or [None] if the
-      partial is zero. *)
+  (** Per operand [Some (t -> t * dy/dx_i)], [None] if zero. *)
   type partials = Prim.t -> value list -> value -> (value -> value) option list
 
+  (** Partials must be linear in [t]; reverse mode then comes free. *)
   val register_elementwise : Prim.t -> partials:partials -> unit
 
-  type operand =
+  type operand = Linear.operand =
     | Linear of Aval.t
     | Fixed of value
 
-  (** Maps the output cotangent to one cotangent per operand ([Zero] for
-      [Fixed] ones). *)
+  (** Output cotangent to one per operand; [Zero] for [Fixed]. *)
   type transpose = Prim.t -> operand list -> value -> Maybe_zero.t list
 
-  (** Linear in all operands jointly, except [fixed]. *)
+  (** Jointly linear, except [fixed]. *)
   val register_linear : ?fixed:int list -> Prim.t -> transpose:transpose -> unit
 
-  (** Linear in each operand separately, e.g. a matrix product. *)
+  (** Linear in each operand, e.g. matmul. *)
   val register_multilinear : Prim.t -> transpose:transpose -> unit
 end
 
-(** User-facing transformations. Tree forms take {!Tree} descriptions; [1]
-    forms take one value. They nest. *)
+(** Nesting transformations. [_tree] forms take {!Tree} descriptions. *)
 module Ad : sig
   type value := Interp.value
 
-  val jvp : 'a Tree.t -> 'b Tree.t -> ('a -> 'b) -> 'a -> 'a -> 'b * 'b
-  val jvp1 : (value -> value) -> value -> value -> value * value
+  (** [(f x, df(x) dx)]. *)
+  val jvp : (value -> value) -> value -> value -> value * value
 
-  (** The tangent along all-ones. *)
+  val jvp_tree : input:'a Tree.t -> output:'b Tree.t -> ('a -> 'b) -> 'a -> 'a -> 'b * 'b
+
+  (** Tangent along ones. *)
   val deriv : (value -> value) -> value -> value
 
   (** Shape [shape (f x) @ shape x]. *)
   val jacfwd : (value -> value) -> value -> value
 
-  (** Call [back] before any enclosing transformation returns. *)
-  val vjp : 'a Tree.t -> 'b Tree.t -> ('a -> 'b) -> 'a -> 'b * ('b -> 'a)
+  (** [(f x, back)]; call [back] inside enclosing transformations. *)
+  val vjp : (value -> value) -> value -> value * (value -> value)
 
-  val vjp1 : (value -> value) -> value -> value * (value -> value)
+  val vjp_tree
+    :  input:'a Tree.t
+    -> output:'b Tree.t
+    -> ('a -> 'b)
+    -> 'a
+    -> 'b * ('b -> 'a)
 
-  (** [f] must return a scalar. *)
-  val value_and_grad : 'a Tree.t -> ('a -> value) -> 'a -> value * 'a
+  (** [f] returns a scalar. *)
+  val value_and_grad : (value -> value) -> value -> value * value
 
-  val value_and_grad1 : (value -> value) -> value -> value * value
-  val grad : 'a Tree.t -> ('a -> value) -> 'a -> 'a
-  val grad1 : (value -> value) -> value -> value
+  val value_and_grad_tree : wrt:'a Tree.t -> ('a -> value) -> 'a -> value * 'a
+  val grad : (value -> value) -> value -> value
+  val grad_tree : wrt:'a Tree.t -> ('a -> value) -> 'a -> 'a
   val jacrev : (value -> value) -> value -> value
   val hessian : (value -> value) -> value -> value
 end

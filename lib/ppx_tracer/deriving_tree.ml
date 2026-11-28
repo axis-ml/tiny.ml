@@ -1,5 +1,3 @@
-(* [@@deriving tree] and [%tree: <type>]: derive a [Tracer.Tree.t] from a type. *)
-
 open Ppxlib
 module B = Ast_builder.Default
 
@@ -10,7 +8,6 @@ let tree_name = function
 
 let tree_fn ~loc name = B.evar ~loc ("Tracer.Tree." ^ name)
 
-(* Shared by the Tree, pattern and expression so their nestings match. *)
 let rec nest ~unit ~tuple = function
   | [] -> unit
   | [ x ] -> x

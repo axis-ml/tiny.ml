@@ -6,7 +6,7 @@ let f x = Ops.(-(sin x * scalar 2.) + x)
 let prim_names (g : Ir.t) = List.map (fun (e : Ir.eqn) -> Prim.name e.prim) g.eqns
 
 let () =
-  let g = Ir.make1 f (s 3.) in
+  let g = Ir.make f (s 3.) in
   Check.bool "f has 4 eqns" (prim_names g = [ "sin"; "mul"; "neg"; "add" ]);
   Check.bool "f has 1 const" (List.length g.consts = 1);
   Check.value "run1 = f" ~expected:(f (s 5.)) (Ir.run1 g (s 5.));
@@ -16,32 +16,29 @@ let () =
     (Ad.deriv (Ir.run1 g) (s 5.));
   Check.value
     "grad run1 = grad f"
-    ~expected:(Ad.grad1 f (s 5.))
-    (Ad.grad1 (Ir.run1 g) (s 5.));
-  Check.bool "retrace run1" (prim_names (Ir.make1 (Ir.run1 g) (s 0.)) = prim_names g)
+    ~expected:(Ad.grad f (s 5.))
+    (Ad.grad (Ir.run1 g) (s 5.));
+  Check.bool "retrace run1" (prim_names (Ir.make (Ir.run1 g) (s 0.)) = prim_names g)
 ;;
 
 let () =
   let x = Check.rand [| 2; 3 |]
   and w = Check.rand [| 3; 4 |] in
-  let g = Ir.make1 (fun x -> Ops.dot x w) x in
+  let g = Ir.make (fun x -> Ops.dot x w) x in
   Check.bool "dot is one eqn" (prim_names g = [ "dot" ]);
-  let gv = Ir.make1 (fun x -> Ops.dot x (Ops.array [| 1.; 2.; 3. |])) x in
+  let gv = Ir.make (fun x -> Ops.dot x (Ops.array [| 1.; 2.; 3. |])) x in
   Check.bool
     "matrix-vector dot is a Dot between reshapes"
     (prim_names gv = [ "reshape"; "dot"; "reshape" ]);
   let loss x = Ops.(reduce_sum (sin (dot x w))) in
-  let fast = Compile.compile1 ~backend:Compile.jit loss in
+  let fast = Compile.compile ~backend:Compile.jit loss in
   Check.value "jit dot" ~expected:(loss x) (fast x);
-  Check.value "grad of jit dot" ~expected:(Ad.grad1 loss x) (Ad.grad1 fast x);
+  Check.value "grad of jit dot" ~expected:(Ad.grad loss x) (Ad.grad fast x);
   let dx = Check.rand ~lo:(-1.) ~hi:1. [| 2; 3 |] in
-  Check.value
-    "jvp of jit dot"
-    ~expected:(snd (Ad.jvp1 loss x dx))
-    (snd (Ad.jvp1 fast x dx));
-  let jit_grad = Compile.compile1 ~backend:Compile.jit (Ad.grad1 loss) in
-  Check.value "jit of grad dot" ~expected:(Ad.grad1 loss x) (jit_grad x);
-  let gg = Ir.make1 (Ad.grad1 loss) x in
+  Check.value "jvp of jit dot" ~expected:(snd (Ad.jvp loss x dx)) (snd (Ad.jvp fast x dx));
+  let jit_grad = Compile.compile ~backend:Compile.jit (Ad.grad loss) in
+  Check.value "jit of grad dot" ~expected:(Ad.grad loss x) (jit_grad x);
+  let gg = Ir.make (Ad.grad loss) x in
   Check.bool
     "grad of dot: one Dot forward, one back, none for the constant"
     (List.length (List.filter (String.equal "dot") (prim_names gg)) = 2)
@@ -49,7 +46,7 @@ let () =
 
 let () =
   let g =
-    Ir.make1
+    Ir.make
       (fun x ->
          let a = Ops.exp x in
          Ops.((a * a) + a))
@@ -68,7 +65,7 @@ let () =
   let layer (x, w) = Ops.(reduce_sum (relu (matmul x w))) in
   let x = Ops.ones [| 2; 3 |]
   and w = Ops.full [| 3; 4 |] 0.5 in
-  let g = Ir.make Tree.(pair value value) Tree.value layer (x, w) in
+  let g = Ir.make_tree ~input:Tree.(pair value value) ~output:Tree.value layer (x, w) in
   Check.bool
     "layer graph is well formed"
     (match Ir.invariant g with
@@ -88,20 +85,20 @@ let () =
 ;;
 
 let () =
-  let g = Ir.make1 f (s 3.) in
+  let g = Ir.make f (s 3.) in
   Check.raises ~matches:Check.is_type_error "run rejects another type" (fun () ->
     Ir.run1 g (Ops.array [| 1.; 2. |]));
   Check.raises ~matches:Check.is_type_error "run rejects an input count" (fun () ->
     Ir.run g []);
   Check.raises ~matches:Check.is_concretization "tracing cannot read data" (fun () ->
-    Ir.make1 (fun x -> s (Ops.to_float x)) (s 3.))
+    Ir.make (fun x -> s (Ops.to_float x)) (s 3.))
 ;;
 
 let () =
   let d =
     Ad.deriv
       (fun y ->
-         let g = Ir.make1 (fun x -> Ops.(x * y)) (s 0.) in
+         let g = Ir.make (fun x -> Ops.(x * y)) (s 0.) in
          Ir.run1 g (s 2.))
       (s 5.)
   in
@@ -111,7 +108,7 @@ let () =
 let () =
   let traces = ref 0 in
   let jit = Compile.jit_with ~on_trace:(fun _ -> incr traces) in
-  let g = Compile.compile1 ~backend:jit f in
+  let g = Compile.compile ~backend:jit f in
   Check.value "jit 3" ~expected:(f (s 3.)) (g (s 3.));
   Check.value "jit 4" ~expected:(f (s 4.)) (g (s 4.));
   Check.bool "jit traces once per type" (!traces = 1);
@@ -119,14 +116,14 @@ let () =
   Check.value "jit on arrays" ~expected:(f v) (g v);
   Check.bool "jit retraces for a new type" (!traces = 2);
   Check.value "deriv of jit" ~expected:(Ad.deriv f (s 3.)) (Ad.deriv g (s 3.));
-  Check.value "grad of jit" ~expected:(Ad.grad1 f (s 3.)) (Ad.grad1 g (s 3.));
+  Check.value "grad of jit" ~expected:(Ad.grad f (s 3.)) (Ad.grad g (s 3.));
   Check.bool "transformations reuse the trace" (!traces = 2);
   let h (x, ys) = Ops.(List.fold_left ( + ) x ys), List.map Ops.sin ys in
   let g =
-    Compile.compile
+    Compile.compile_tree
       ~backend:Compile.jit
-      Tree.(pair value (list value))
-      Tree.(pair value (list value))
+      ~input:Tree.(pair value (list value))
+      ~output:Tree.(pair value (list value))
       h
   in
   List.iter
@@ -141,10 +138,10 @@ let () =
     [ 2; 5; 2; 0; 5 ];
   let k (xs, ys) = [ Ops.(List.fold_left ( + ) (scalar 0.) xs * scalar 10.) ] @ ys in
   let g =
-    Compile.compile
+    Compile.compile_tree
       ~backend:Compile.jit
-      Tree.(pair (list value) (list value))
-      Tree.(list value)
+      ~input:Tree.(pair (list value) (list value))
+      ~output:Tree.(list value)
       k
   in
   let a = [ s 1.; s 2. ], [ s 3. ]
@@ -158,13 +155,23 @@ let () =
 ;;
 
 let () =
-  let g = Ir.make1 f (s 3.) in
+  let g = Ir.make f (s 3.) in
+  let rebuild ?(params = g.params) ?(eqns = g.eqns) () =
+    Ir.Unchecked.graph
+      ~captures:g.captures
+      ~consts:g.consts
+      ~params
+      ~eqns
+      ~outputs:g.outputs
+      ~num_vars:g.num_vars
+      ()
+  in
   Check.raises
     ~matches:(function
       | Invalid_argument _ -> true
       | _ -> false)
     "run rejects a var used before it is defined"
-    (fun () -> Ir.run1 { g with eqns = List.tl g.eqns } (s 1.));
+    (fun () -> Ir.run1 (rebuild ~eqns:(List.tl g.eqns) ()) (s 1.));
   let is_failure = function
     | Failure _ -> true
     | _ -> false
@@ -172,33 +179,35 @@ let () =
   Check.raises
     ~matches:is_failure
     "invariant rejects a var used before it is defined"
-    (fun () -> Ir.invariant { g with eqns = List.tl g.eqns });
+    (fun () -> Ir.invariant (rebuild ~eqns:(List.tl g.eqns) ()));
   Check.raises
     ~matches:is_failure
     "invariant rejects an output of the wrong type"
     (fun () ->
        Ir.invariant
-         { g with
-           eqns =
-             List.map
-               (fun (e : Ir.eqn) ->
-                  { e with
-                    outputs =
-                      List.map
-                        (fun (v : Ir.var) -> { v with aval = Aval.create [| 7 |] })
-                        e.outputs
-                  })
-               g.eqns
-         });
+         (rebuild
+            ~eqns:
+              (List.map
+                 (fun (e : Ir.eqn) ->
+                    Ir.Unchecked.eqn
+                      e.prim
+                      ~inputs:e.inputs
+                      ~outputs:
+                        (List.map
+                           (fun (v : Ir.var) ->
+                              Ir.Unchecked.var ~id:v.id (Aval.create [| 7 |]))
+                           e.outputs))
+                 g.eqns)
+            ()));
   Check.raises ~matches:is_failure "invariant rejects a var defined twice" (fun () ->
-    Ir.invariant { g with params = g.params @ g.params })
+    Ir.invariant (rebuild ~params:(g.params @ g.params) ()))
 ;;
 
 let () =
   let traces = ref 0 in
   let w = ref (s 1.) in
   let fast =
-    Compile.compile1
+    Compile.compile
       ~backend:(Compile.jit_with ~on_trace:(fun _ -> incr traces))
       (fun x -> Ops.(x * !w))
   in
@@ -206,8 +215,8 @@ let () =
     w := wv;
     fast (s 3.)
   in
-  Check.value "jit capture: grad" ~expected:(s 3.) (Ad.grad1 loss (s 2.));
-  Check.value "jit capture: grad again" ~expected:(s 3.) (Ad.grad1 loss (s 5.));
+  Check.value "jit capture: grad" ~expected:(s 3.) (Ad.grad loss (s 2.));
+  Check.value "jit capture: grad again" ~expected:(s 3.) (Ad.grad loss (s 5.));
   Check.bool "jit capture: retraced, not cached" (!traces = 2);
   w := s 10.;
   Check.value "jit after captures: arrays work" ~expected:(s 30.) (fast (s 3.));
@@ -217,7 +226,7 @@ let () =
   let _ =
     Ad.deriv
       (fun y ->
-         let g = Ir.make1 (fun x -> Ops.(x * y)) (s 0.) in
+         let g = Ir.make (fun x -> Ops.(x * y)) (s 0.) in
          Check.bool "capture recorded" (List.length g.captures = 1 && g.consts = []);
          let g', vs = Ir.closure_convert g in
          Check.bool "closure_convert: captures become params" (List.length g'.params = 2);
@@ -238,10 +247,10 @@ let () =
 
 let () =
   let c = s 2. in
-  let g = Ir.make1 (fun x -> Ops.((x * c) + c)) (s 0.) in
+  let g = Ir.make (fun x -> Ops.((x * c) + c)) (s 0.) in
   Check.bool "one const per array" (List.length g.consts = 1);
   let g =
-    Ir.make1
+    Ir.make
       (fun x ->
          let _unused = Ops.sin x in
          Ops.(exp x * exp x))
@@ -271,6 +280,24 @@ let () =
        (fun (e : Ir.eqn) ->
           List.for_all (fun (v : Ir.var) -> v.id < g.num_vars) e.outputs)
        g.eqns)
+;;
+
+let () =
+  let g =
+    Ir.make
+      (fun x ->
+         (Ops.shape x).(0) <- 7;
+         Ops.sin x)
+      (Ops.zeros [| 3 |])
+  in
+  Check.bool
+    "mutating Ops.shape leaves the graph alone"
+    (List.map (fun (v : Ir.var) -> v.aval.shape) (g.params @ g.outputs)
+     = [ [| 3 |]; [| 3 |] ]);
+  Check.value
+    "and it still runs"
+    ~expected:(Ops.zeros [| 3 |])
+    (Ir.run1 g (Ops.zeros [| 3 |]))
 ;;
 
 let () = Check.finish ()

@@ -1,6 +1,3 @@
-(* [%ops e] and [let%ops f x = e]: float syntax on traced values. Int
-   operators stay Stdlib's. *)
-
 open Ppxlib
 module B = Ast_builder.Default
 
@@ -19,7 +16,6 @@ let binops =
   ]
 ;;
 
-(* Plain [abs] is int's, so it is left alone. *)
 let funcs =
   List.concat_map
     (fun n -> [ Lident n, n; Ldot (Lident "Float", n), n ])

@@ -18,6 +18,10 @@
   norm2 x                        5.0
   grad norm2 x = 2x              [0.0 2.0 4.0]
 
+-- vmap: map a function over a batch dim --
+  vmap norm2 m (per row)         [14.0 77.0]
+  vmap (grad norm2) m = 2m       [[2.0 4.0 6.0] [8.0 10.0 12.0]]
+
 -- Newton's method for cos x = x --
   step 1                         0.7503638678402439
   step 2                         0.7391128909113617
@@ -33,15 +37,15 @@
 
 -- training --
   loss at step 0                 0.8353981079772941
-  loss at step 400               0.00480868128287857
-  loss at step 800               0.001905116463841168
-  loss at step 1200              0.0009750513919910417
-  loss at step 1600              0.0007343026774891093
-  loss at step 2000              0.0004559246516595616
+  loss at step 400               0.004808681282878563
+  loss at step 800               0.0019051164638411585
+  loss at step 1200              0.0009750514432711452
+  loss at step 1600              0.0007223230845764583
+  loss at step 2000              0.0004520553639976209
 
 -- the network against sin --
   x                              [-2.0 -0.5 1.0 2.5]
-  predict                        [-0.8755141676927869 -0.4749899078262743 0.8494035611309897 0.5822452148503715]
+  predict                        [-0.8756580513254916 -0.47491884812647656 0.8493324990929746 0.5823224319321915]
   sin x                          [-0.9092974268256817 -0.479425538604203 0.8414709848078965 0.5984721441039565]
 
 === jit: trace to a graph, compile with jit ===
@@ -56,16 +60,16 @@
 
 -- the graph of grad f: derivatives are ops too --
     params: %0:f64[]
-    %3:f64[] = const 1.0
-    %5:f64[] = const 1.0
+    %4:f64[] = const 1.0
+    %6:f64[] = const 1.0
     %1:f64[] = sin(%0)
-    %2:f64[] = mul(%0, %1)
-    %4:f64[] = add(%2, %3)
-    %6:f64[] = mul(%5, %1)
-    %7:f64[] = mul(%0, %5)
-    %8:f64[] = cos(%0)
-    %9:f64[] = mul(%7, %8)
-    %10:f64[] = add(%6, %9)
+    %2:f64[] = cos(%0)
+    %3:f64[] = mul(%0, %1)
+    %5:f64[] = add(%3, %4)
+    %7:f64[] = mul(%0, %6)
+    %8:f64[] = mul(%6, %1)
+    %9:f64[] = mul(%7, %2)
+    %10:f64[] = add(%8, %9)
     outputs: %10
 
 -- jit: traced on the first call for each input type --
@@ -76,9 +80,31 @@
   fast [1 2] (new shape)         [1.8414709848078965 2.8185948536513634]
   deriv fast 1                   1.3817732906760363
 
+-- under a transformation, a jitted function stays one call --
+    params: %0:f64[]
+    %5:f64[] = const 1.0
+    %1:f64[], %2:f64[], %3:f64[], %4:f64[] = call(%0)
+      known(jvp(jit)):
+        params: %0:f64[]
+        %4:f64[] = const 1.0
+        %1:f64[] = sin(%0)
+        %2:f64[] = cos(%0)
+        %3:f64[] = mul(%0, %1)
+        %5:f64[] = add(%3, %4)
+        outputs: %5, %2, %1, %0
+    %6:f64[] = call(%2, %3, %4, %5)
+      transpose(unknown(jvp(jit))):
+        params: %0:f64[], %1:f64[], %2:f64[], %3:f64[]
+        %4:f64[] = mul(%2, %3)
+        %5:f64[] = mul(%3, %1)
+        %6:f64[] = mul(%4, %0)
+        %7:f64[] = add(%5, %6)
+        outputs: %7
+    outputs: %6
+
 -- while tracing there is no data to branch on --
   leaky 2, eager                 2.0
-  Ir.make1 leaky: stage tracer #19 f64[] has no concrete value: stage only knows its type, so its data cannot be read (e.g. for an if on a value)
+  Ir.make leaky: stage tracer #38 f64[] has no concrete value: stage only knows its type, so its data cannot be read (e.g. for an if on a value)
 
 -- Control.cond traces both branches, so it stages --
     params: %0:f64[]

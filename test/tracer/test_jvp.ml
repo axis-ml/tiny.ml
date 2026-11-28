@@ -21,7 +21,7 @@ let () =
     "f 3.0 = 2.7177599838802657"
     ~expected:2.7177599838802657
     (Ops.to_float (f (s 3.)));
-  let y, dy = Ad.jvp1 f (s 3.) (s 1.) in
+  let y, dy = Ad.jvp f (s 3.) (s 1.) in
   Check.float "jvp f 3.0: primal" ~expected:2.7177599838802657 (Ops.to_float y);
   Check.float
     "jvp f 3.0: tangent = 1 - 2 cos 3"
@@ -40,7 +40,6 @@ let () =
     "deriv^4 sin = sin"
     ~expected:(Float.sin 3.)
     (Ops.to_float (d (d (d (d sin))) x));
-  (* g is constant in its argument. *)
   let pc x =
     let g _ = x in
     let should_be_zero = Ad.deriv g (s 0.) in
@@ -50,7 +49,6 @@ let () =
     "perturbation confusion (Autodidax2) = 0"
     ~expected:0.
     (Ops.to_float (Ad.deriv pc (s 0.)));
-  (* Siskind & Pearlmutter: d/dx [x * d/dy (x + y)] = 1; confusing tags gives 2. *)
   let sp x = Ops.mul x (Ad.deriv (fun y -> Ops.add x y) (s 1.)) in
   Check.float
     "perturbation confusion (Siskind-Pearlmutter) = 1"
@@ -80,10 +78,10 @@ let () =
   Check.raises
     ~matches:Check.is_type_error
     "jvp rejects tangent of wrong shape"
-    (fun () -> Ad.jvp1 f (s 3.) (Ops.ones [| 2 |]));
+    (fun () -> Ad.jvp f (s 3.) (Ops.ones [| 2 |]));
   Check.raises
     ~matches:(function
-      | Type_error m ->
+      | Error (Type_error m) ->
         m
         = "add: cannot broadcast f64[2] and f64[3] together (dims must match from the \
            right, or be 1)"
@@ -92,7 +90,7 @@ let () =
     (fun () -> Ops.add (Ops.zeros [| 2 |]) (Ops.zeros [| 3 |]));
   Check.bool
     "uncaught errors print without the module path"
-    (Printexc.to_string (Type_error "boom") = "Type_error: boom");
+    (Printexc.to_string (Error (Type_error "boom")) = "Type_error: boom");
   Check.raises "exception inside jvp propagates" (fun () ->
     Ad.deriv (fun _ -> failwith "boom") (s 1.));
   Check.bool
@@ -124,7 +122,6 @@ let () =
     ~matches:Check.is_escaped
     "escaped jvp tracer is rejected by eval"
     (fun () -> Ops.sin !leaked);
-  (* Symbolic zeros: no zero array is built for the constant m. *)
   let m = Ops.full [| 1000 |] 2. in
   let ops = ref [] in
   let counter =
@@ -134,7 +131,7 @@ let () =
   in
   ignore
     (Interp.handle counter (fun () ->
-       Ad.jvp1
+       Ad.jvp
          (fun x -> Ops.add (Ops.mul x m) m)
          (Ops.ones [| 1000 |])
          (Ops.ones [| 1000 |])));

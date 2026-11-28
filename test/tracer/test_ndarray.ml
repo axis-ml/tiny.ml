@@ -151,9 +151,9 @@ let () =
   Check.array
     "broadcast_to stretches size-1 dim"
     ~expected:(nd [| 2; 3 |] [| 1.; 1.; 1.; 2.; 2.; 2. |])
-    (Ndarray.broadcast_to [| 2; 3 |] (nd [| 2; 1 |] [| 1.; 2. |]));
+    (Ndarray.broadcast_to ~shape:[| 2; 3 |] (nd [| 2; 1 |] [| 1.; 2. |]));
   Check.raises "broadcast_to rejects incompatible shape" (fun () ->
-    Ndarray.broadcast_to [| 2; 3 |] (nd [| 2; 2 |] [| 1.; 2.; 3.; 4. |]));
+    Ndarray.broadcast_to ~shape:[| 2; 3 |] (nd [| 2; 2 |] [| 1.; 2.; 3.; 4. |]));
   Check.array
     "transpose 2D"
     ~expected:(nd [| 3; 2 |] [| 1.; 4.; 2.; 5.; 3.; 6. |])
@@ -232,7 +232,7 @@ let () =
   let s = Ndarray.scalar 2.5 in
   exact "transpose rank 0" ~expected:s (Ndarray.transpose ~perm:[||] s);
   exact "reduce_sum rank 0" ~expected:s (Ndarray.reduce_sum ~axes:[] s);
-  exact "broadcast_to rank 0" ~expected:s (Ndarray.broadcast_to [||] s);
+  exact "broadcast_to rank 0" ~expected:s (Ndarray.broadcast_to ~shape:[||] s);
   exact
     "transpose zero-size"
     ~expected:(Ndarray.zeros [| 3; 0; 2 |])

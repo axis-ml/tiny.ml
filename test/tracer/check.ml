@@ -37,11 +37,10 @@ let rand ?(lo = 0.5) ?(hi = 2.0) shape =
   Ops.of_ndarray (Ndarray.init shape (fun _ -> lo +. Random.float (hi -. lo)))
 ;;
 
-(* Central difference along a random direction. *)
 let fd_check ?(eps = 1e-6) name f xs =
   let dxs = List.map (fun x -> rand ~lo:(-1.) ~hi:1. (Ops.shape x)) xs in
   let vs = Tree.(list value) in
-  let _, tangents = Ad.jvp vs vs f xs dxs in
+  let _, tangents = Ad.jvp_tree ~input:vs ~output:vs f xs dxs in
   let at t = f (List.map2 (fun x dx -> Ops.add x (Ops.mul (Ops.scalar t) dx)) xs dxs) in
   let fd =
     List.map2
@@ -77,17 +76,17 @@ let raises ?(matches = fun _ -> true) name f =
 ;;
 
 let is_type_error = function
-  | Type_error _ -> true
+  | Error (Type_error _) -> true
   | _ -> false
 ;;
 
 let is_escaped = function
-  | Escaped_tracer _ -> true
+  | Error (Escaped_tracer _) -> true
   | _ -> false
 ;;
 
 let is_concretization = function
-  | Concretization_error _ -> true
+  | Error (Concretization_error _) -> true
   | _ -> false
 ;;
 
@@ -98,7 +97,7 @@ let contains s sub =
 ;;
 
 let is_missing_rule = function
-  | Missing_rule _ -> true
+  | Error (Missing_rule _) -> true
   | _ -> false
 ;;
 

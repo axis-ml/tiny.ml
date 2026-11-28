@@ -1,30 +1,25 @@
 open Common
 open Lang
 
-(** A function traced once into a DAG of primitive applications (JAX's
-    jaxpr). Tracers carry only types, so [f] cannot read data. *)
+(** A traced DAG (JAX's jaxpr). Only types are known while tracing. *)
 module Ir : sig
   type value := Interp.value
 
-  type var =
+  type var = private
     { id : int
     ; aval : Aval.t
     }
 
-  type eqn =
+  type eqn = private
     { prim : Prim.t
     ; inputs : var list
     ; outputs : var list
     }
 
-  (** [eqns] are in evaluation order. Var ids are [0 .. num_vars - 1].
-
-      What [f] reads without taking it as an argument is a [const] if it is
-      an array, and a [capture] if it is a tracer of an enclosing
-      transformation. A capture is only valid while that transformation
-      runs: {!run} raises [Escaped_tracer] after, and {!closure_convert}
-      turns captures into params. *)
-  type t =
+  (** [eqns] in eval order; ids [< num_vars]. Free arrays are [consts], free
+      outer tracers are [captures] (valid only while their transformation
+      runs; see {!closure_convert}). *)
+  type t = private
     { params : var list
     ; captures : (var * value) list
     ; consts : (var * Ndarray.t) list
@@ -36,86 +31,125 @@ module Ir : sig
   val trace : (value list -> value list) -> Aval.t list -> t
   val trace_aux : (value list -> value list * 'a) -> Aval.t list -> t * 'a
 
-  (** Traces at the types of [x]'s leaves; the data is unused. *)
-  val make : 'a Tree.t -> 'b Tree.t -> ('a -> 'b) -> 'a -> t
+  (** Traces at [x]'s type. *)
+  val make : (value -> value) -> value -> t
 
-  val make1 : (value -> value) -> value -> t
+  val make_tree : input:'a Tree.t -> output:'b Tree.t -> ('a -> 'b) -> 'a -> t
 
-  (** [g'] takes [captures @ params]; returns the captured values. *)
+  (** Captures become leading params; returns their values. *)
   val closure_convert : t -> t * value list
 
-  (** Raises [Failure] unless [g] is well formed. *)
+  (** Raises [Failure] if ill-formed. *)
   val invariant : t -> unit
 
-  (** Binds each eqn, so it works under every interpreter. *)
+  (** Works under every interpreter. *)
   val run : t -> value list -> value list
 
   val run1 : t -> value -> value
 
   (** {2 Inspection} *)
 
-  (** Indexed by var id: the eqn that defines it, if any. *)
+  (** By var id. *)
   val producers : t -> eqn option array
 
-  (** Indexed by var id: the eqns that read it, in order. *)
+  (** By var id. *)
   val users : t -> eqn list array
 
-  (** Eqns no output depends on. They still run: there are no passes yet. *)
+  (** Eqns no output needs (still run). *)
   val dead : t -> eqn list
 
-  (** The graphs a primitive carries (e.g. the branches of a cond). *)
+  (** e.g. a cond's branches. *)
   val sub_graphs : Prim.t -> (string * t) list
 
-  (** For primitives with graph params, so that [invariant], [to_string]
-      and [to_dot] look inside them. *)
+  (** Lets [invariant], [to_string], [to_dot] see inside. *)
   val register_sub_graphs : Prim.t -> (Prim.t -> (string * t) list) -> unit
 
-  (** Sub-graphs are printed indented under their eqn. *)
   val to_string : t -> string
-
   val pp : Format.formatter -> t -> unit
 
-  (** Graphviz source. Dead eqns are dashed, sub-graphs are clusters. *)
+  (** Graphviz; dead eqns dashed. *)
   val to_dot : t -> string
+
+  (** {2 Construction}
+
+      Unchecked; use {!invariant}. *)
+  module Unchecked : sig
+    val var : id:int -> Aval.t -> var
+    val eqn : Prim.t -> inputs:var list -> outputs:var list -> eqn
+
+    val graph
+      :  ?captures:(var * value) list
+      -> ?consts:(var * Ndarray.t) list
+      -> params:var list
+      -> eqns:eqn list
+      -> outputs:var list
+      -> num_vars:int
+      -> unit
+      -> t
+  end
 end
 
-(** Runs a function through a backend on flat leaves. *)
+(** For rules of graph-carrying primitives. Internal. *)
+module Util : sig
+  type value := Interp.value
+
+  (** Raises [Failure] on captures. *)
+  val traced : (value list -> value list) -> Aval.t list -> Ir.t
+
+  val traced_aux : (value list -> value list * 'a) -> Aval.t list -> Ir.t * 'a
+
+  (** Placeholder for registration keys. *)
+  val empty : Ir.t
+
+  (** For [Jvp.jvp_flat] and the like. *)
+  val as_fn : Ir.t -> value list -> value list * unit
+end
+
+(** Runs a function through a backend. *)
 module Compile : sig
   type value := Interp.value
 
   module type Backend = sig
     val name : string
 
-    (** Called once per input structure; a caching backend keys on input
-        avals and returns the extra result [f] gave for that key. *)
+    (** Once per input structure. *)
     val compile : (value list -> value list * 'aux) -> value list -> value list * 'aux
   end
 
   type backend = (module Backend)
 
+  (** A closed graph called as one op (JAX's pjit). *)
+  type Prim.t +=
+    | Call of
+        { name : string
+        ; graph : Ir.t
+        }
+
   val eager : backend
 
-  (** Traces once per list of input avals and runs the cached graph.
-      Arrays [f] reads from outside are baked in at trace time; a graph
-      that captures a tracer is not cached, so [f] is traced on each call. *)
+  (** Caches a [Call] per input avals. Free arrays are baked in; graphs
+      capturing tracers are retraced each call. *)
   val jit : backend
 
   val jit_with : on_trace:(Ir.t -> unit) -> backend
 
   (** [backend] defaults to {!eager}. *)
-  val compile : ?backend:backend -> 'a Tree.t -> 'b Tree.t -> ('a -> 'b) -> 'a -> 'b
+  val compile : ?backend:backend -> (value -> value) -> value -> value
 
-  val compile1 : ?backend:backend -> (value -> value) -> value -> value
+  val compile_tree
+    :  ?backend:backend
+    -> input:'a Tree.t
+    -> output:'b Tree.t
+    -> ('a -> 'b)
+    -> 'a
+    -> 'b
 end
 
-(** Control flow on data. Both branches (or the loop's cond and body) are
-    traced into sub-graphs, so these work under every interpreter,
-    including staging, where an OCaml [if] on a value cannot. *)
+(** Control flow on data; works under staging, unlike OCaml [if]. *)
 module Control : sig
   type value := Interp.value
 
-  (** Operands: the predicate, then the inputs of [then_], then those of
-      [else_]. Each branch takes what it captured, then the arguments. *)
+  (** Cond operands: predicate, [then_] inputs, [else_] inputs. *)
   type Prim.t +=
     | Cond of
         { then_ : Ir.t
@@ -125,24 +159,27 @@ module Control : sig
         { cond : Ir.t
         ; body : Ir.t
         }
-          (** Operands: [cond]'s captures, [body]'s captures, the carry. *)
+          (** Operands: [cond] captures, [body] captures, carry. *)
 
-  (** [then_ x] if the scalar [pred] is [> 0], else [else_ x]. Both branches
-      are traced and must return the same types. *)
-  val cond
-    :  'a Tree.t
-    -> 'b Tree.t
+  (** [then_ x] if scalar [pred > 0], else [else_ x]; same result types. *)
+  val cond : value -> then_:(value -> value) -> else_:(value -> value) -> value -> value
+
+  val cond_tree
+    :  input:'a Tree.t
+    -> output:'b Tree.t
     -> value
     -> then_:('a -> 'b)
     -> else_:('a -> 'b)
     -> 'a
     -> 'b
 
-  val cond1 : value -> then_:(value -> value) -> else_:(value -> value) -> value -> value
+  (** While [cond carry > 0]. No [vjp] ([Missing_rule]). *)
+  val while_loop : cond:(value -> value) -> body:(value -> value) -> value -> value
 
-  (** Runs [body] while [cond carry > 0]. [body] keeps the carry's types.
-      Forward-differentiable only: [vjp] raises [Missing_rule]. *)
-  val while_loop : 'a Tree.t -> cond:('a -> value) -> body:('a -> 'a) -> 'a -> 'a
-
-  val while_loop1 : cond:(value -> value) -> body:(value -> value) -> value -> value
+  val while_loop_tree
+    :  carry:'a Tree.t
+    -> cond:('a -> value)
+    -> body:('a -> 'a)
+    -> 'a
+    -> 'a
 end

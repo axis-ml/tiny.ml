@@ -1,6 +1,7 @@
 ; The tracer: eval and jvp of plain OCaml functions, open to new primitives
 ; and new transformations. [Tracer] is the entry point; the other modules
-; are its layers, in dependency order: common, lang, autodiff, staging.
+; are its layers, in dependency order: common, lang, autodiff, staging,
+; batching.
 
 (library
  (name tracer)

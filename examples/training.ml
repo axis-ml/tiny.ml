@@ -1,9 +1,6 @@
-(* Fit a small neural network to sin x with gradient descent. *)
-
 open Tracer
 open Common
 
-(* [@@deriving tree] tells [Ad.grad] where the arrays are. *)
 type layer =
   { w : value
   ; b : value
@@ -21,7 +18,7 @@ let%ops predict net x = dense net.out (tanh (dense net.hidden x))
 let%ops loss net (x, y) = mean (square (predict net x -. y))
 
 let sgd_step data net =
-  let grads = Ad.grad mlp_tree (fun net -> loss net data) net in
+  let grads = Ad.grad_tree ~wrt:mlp_tree (fun net -> loss net data) net in
   Tree.map2 mlp_tree [%ops fun p g -> p -. (0.1 *. g)] net grads
 ;;
 
@@ -36,22 +33,44 @@ let init ~hidden =
   }
 ;;
 
+let log_loss ~loss i net = print (Printf.sprintf "loss at step %d" i) (loss net)
+
+let train ~steps ~log_every ~step ~loss net0 =
+  Seq.iterate step net0
+  |> Seq.take (steps + 1)
+  |> Seq.fold_lefti
+       (fun _ i net ->
+          if i < steps && i mod log_every = 0 then log_loss ~loss i net;
+          net)
+       net0
+;;
+
+let flat v = Ops.reshape ~shape:[| Ops.size v |] v
+
 let run () =
   let x = Ops.reshape ~shape:[| 32; 1 |] (Ops.linspace (-3.) 3. 32) in
   let data = x, Ops.sin x in
-  (* Traced once, then replayed every iteration. *)
-  let step = Compile.compile ~backend:Compile.jit mlp_tree mlp_tree (sgd_step data) in
+  let step =
+    Compile.compile_tree
+      ~backend:Compile.jit
+      ~input:mlp_tree
+      ~output:mlp_tree
+      (sgd_step data)
+  in
   title "training";
-  let net = ref (init ~hidden:16) in
-  for i = 0 to 2000 do
-    if i mod 400 = 0 then print (Printf.sprintf "loss at step %d" i) (loss !net data);
-    net := step !net
-  done;
+  let net =
+    train
+      ~steps:2001
+      ~log_every:400
+      ~step
+      ~loss:(fun net -> loss net data)
+      (init ~hidden:16)
+  in
   title "the network against sin";
   let probe = Ops.array ~shape:[| 4; 1 |] [| -2.; -0.5; 1.; 2.5 |] in
-  print "x" (Ops.reshape ~shape:[| 4 |] probe);
-  print "predict" (Ops.reshape ~shape:[| 4 |] (predict !net probe));
-  print "sin x" (Ops.reshape ~shape:[| 4 |] (Ops.sin probe))
+  print "x" (flat probe);
+  print "predict" (flat (predict net probe));
+  print "sin x" (flat (Ops.sin probe))
 ;;
 
 let example =

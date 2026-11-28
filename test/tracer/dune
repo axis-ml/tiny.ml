@@ -12,6 +12,7 @@
   test_control
   test_concrete
   test_ad
+  test_vmap
   test_ppx
   test_examples)
  (libraries tiny_ml.tracer tiny_ml_examples)
@@ -39,6 +40,7 @@
     (run %{exe:test_control.exe})
     (run %{exe:test_concrete.exe})
     (run %{exe:test_ad.exe})
+    (run %{exe:test_vmap.exe})
     (run %{exe:test_ppx.exe})))))
 
 (rule

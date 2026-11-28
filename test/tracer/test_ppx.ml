@@ -16,7 +16,6 @@ let%ops inverse x = acosh (x +. 1.) +. atanh (x /. 4.)
 let%ops scaled x n = x *. float_of_int n
 let%ops loss (w, b) x = mean (square (matmul w x +. b))
 
-(* Int arithmetic and comparisons stay Stdlib's. *)
 let%ops repeat_half x =
   let n = size x in
   reshape ~shape:[| n * 2 |] (concatenate [ x; x ]) *. 0.5
@@ -87,16 +86,16 @@ let () =
   Check.value
     "%ops under grad: grad softplus = logistic"
     ~expected:(logistic x)
-    (Ad.grad1 (fun x -> Ops.reduce_sum (softplus x)) x);
+    (Ad.grad (fun x -> Ops.reduce_sum (softplus x)) x);
   Check.value
     "%ops: branch on a value under grad"
     ~expected:(Ops.cos (s 1.))
-    (Ad.grad1 branchy (s 1.));
+    (Ad.grad branchy (s 1.));
   Check.raises
     ~matches:Check.is_concretization
     "%ops: branch on a value while staging"
-    (fun () -> Ir.make1 branchy (s 1.));
-  let fast = Compile.compile1 ~backend:Compile.jit f in
+    (fun () -> Ir.make branchy (s 1.));
+  let fast = Compile.compile ~backend:Compile.jit f in
   Check.value "%ops under jit" ~expected:(f x) (fast x)
 ;;
 
@@ -180,15 +179,15 @@ let () =
               (pair value value))
            value))
   in
-  let g = Ad.grad mlp_tree loss net in
-  let g' = Ad.grad manual loss net in
+  let g = Ad.grad_tree ~wrt:mlp_tree loss net in
+  let g' = Ad.grad_tree ~wrt:manual loss net in
   Check.bool
     "deriving: grad matches a hand-written tree"
     (List.for_all2 Ops.allclose (Tree.leaves mlp_tree g) (Tree.leaves manual g'));
   let y, dy =
-    Ad.jvp
-      [%tree: value * value list]
-      [%tree: value]
+    Ad.jvp_tree
+      ~input:[%tree: value * value list]
+      ~output:[%tree: value]
       (fun (a, bs) -> List.fold_left Ops.mul a bs)
       (s 2., [ s 3.; s 4. ])
       (s 1., [ s 0.; s 0. ])

@@ -9,17 +9,17 @@ module Prim = struct
     ; impl : t -> Ndarray.t list -> Ndarray.t list
     }
 
-  (* Constructors with arguments share one key. *)
   let key (p : t) = Obj.Extension_constructor.(id (of_val p))
   let registry : (int, info) Hashtbl.t = Hashtbl.create 32
 
   let register p ~name ~abstract_eval ~impl =
     let k = key p in
-    Hashtbl.iter
-      (fun k' i ->
-         if k' <> k && String.equal i.name name
-         then invalid_arg ("Prim.register: another primitive is already named " ^ name))
-      registry;
+    let taken_by_another =
+      Hashtbl.to_seq registry
+      |> Seq.exists (fun (k', i) -> k' <> k && String.equal i.name name)
+    in
+    if taken_by_another
+    then invalid_arg ("Prim.register: another primitive is already named " ^ name);
     Hashtbl.replace registry k { name; abstract_eval; impl }
   ;;
 
@@ -36,7 +36,10 @@ module Prim = struct
   let impl p arrays = (info p).impl p arrays
 
   let names () =
-    List.sort compare (Hashtbl.fold (fun _ i acc -> i.name :: acc) registry [])
+    Hashtbl.to_seq_values registry
+    |> Seq.map (fun i -> i.name)
+    |> List.of_seq
+    |> List.sort compare
   ;;
 
   let arity_error p ~expected got =
@@ -61,10 +64,7 @@ module Prim = struct
     let find t (p : prim) =
       match Hashtbl.find_opt t.rules (key p) with
       | Some r -> r
-      | None ->
-        raise
-          (Error.Missing_rule
-             (Printf.sprintf "%s has no rule for %s" t.transformation (name p)))
+      | None -> Error.missing_rule "%s has no rule for %s" t.transformation (name p)
     ;;
 
     let find_opt t (p : prim) = Hashtbl.find_opt t.rules (key p)
@@ -80,11 +80,6 @@ module Prim = struct
 end
 
 module Interp = struct
-  (* A per-interpreter witness recovers ['p] without a cast ([Type.Id] by
-     hand, for OCaml 5.0). *)
-
-  open Error
-
   type (_, _) eq = Refl : ('a, 'a) eq
   type _ witness = ..
 
@@ -107,7 +102,7 @@ module Interp = struct
     ; same : 'b. 'b witness -> ('p, 'b) eq option
     ; process : 'p t -> Prim.t -> value list -> value list
     ; concrete : 'p -> value option
-    ; mutable active : int (* how many [handle]s of it are running *)
+    ; mutable active : int
     }
 
   type any = Any : _ t -> any
@@ -116,7 +111,7 @@ module Interp = struct
 
   let aval = function
     | Arr a -> Aval.of_ndarray a
-    | Tracer (T t) -> t.aval
+    | Tracer (T t) -> Aval.create ~dtype:t.aval.dtype (Array.copy t.aval.shape)
   ;;
 
   let label (Any i) = Printf.sprintf "%s#%d" i.name i.id
@@ -155,7 +150,11 @@ module Interp = struct
 
   let name i = i.name
   let id i = i.id
-  let tracer interp aval payload = Tracer (T { interp; aval; payload })
+
+  let tracer interp (aval : Aval.t) payload =
+    let aval = Aval.create ~dtype:aval.dtype (Array.copy aval.shape) in
+    Tracer (T { interp; aval; payload })
+  ;;
 
   let payload (type p) (i : p t) v : p option =
     match v with
@@ -167,32 +166,30 @@ module Interp = struct
   ;;
 
   let eval prim args =
-    let concrete = function
+    let expect_array = function
       | Arr a -> a
       | v ->
-        raise
-          (Escaped_tracer
-             (Printf.sprintf
-                "%s received %s at the eval interpreter: the tracer escaped the \
-                 transformation that created it"
-                (Prim.name prim)
-                (describe v)))
+        Error.escaped_tracer
+          "%s received %s at the eval interpreter: the tracer escaped the transformation \
+           that created it"
+          (Prim.name prim)
+          (describe v)
     in
-    let arrays = List.map concrete args in
+    let arrays = List.map expect_array args in
     let expected = Prim.abstract_eval prim (List.map Aval.of_ndarray arrays) in
     let outs = Prim.impl prim arrays in
-    if List.map Aval.of_ndarray outs <> expected
+    if not (List.equal Aval.equal (List.map Aval.of_ndarray outs) expected)
     then
       failwith
         (Printf.sprintf
            "%s: impl and abstract_eval disagree on the output type"
            (Prim.name prim));
-    List.map (fun a -> Arr a) outs
+    List.map of_ndarray outs
   ;;
 
   type _ Effect.t +=
     | Bind : Prim.t * value list -> value list Effect.t
-    | Stack : any list Effect.t (** innermost first, eval excluded *)
+    | Stack : any list Effect.t
 
   let bind prim args =
     try Effect.perform (Bind (prim, args)) with
@@ -202,7 +199,8 @@ module Interp = struct
   let bind1 prim args =
     match bind prim args with
     | [ y ] -> y
-    | ys -> type_error "%s: expected 1 result, got %d" (Prim.name prim) (List.length ys)
+    | ys ->
+      Error.type_error "%s: expected 1 result, got %d" (Prim.name prim) (List.length ys)
   ;;
 
   let stack () =
@@ -212,18 +210,19 @@ module Interp = struct
 
   let handle i f =
     let open Effect.Deep in
+    let leave () = i.active <- i.active - 1 in
     i.active <- i.active + 1;
     match_with
       f
       ()
       { retc =
           (fun x ->
-            i.active <- i.active - 1;
+            leave ();
             x)
       ; exnc =
           (fun e ->
             let bt = Printexc.get_raw_backtrace () in
-            i.active <- i.active - 1;
+            leave ();
             Printexc.raise_with_backtrace e bt)
       ; effc =
           (fun (type a) (eff : a Effect.t) ->
@@ -231,7 +230,6 @@ module Interp = struct
             | Bind (prim, args) ->
               Some
                 (fun (k : (a, _) continuation) ->
-                  (* Re-raise at the [bind] in [f], so it unwinds [f]. *)
                   match i.process i prim args with
                   | out -> continue k out
                   | exception e ->
@@ -252,26 +250,21 @@ module Interp = struct
     | Tracer (T t) as v ->
       if t.interp.active = 0
       then
-        raise
-          (Escaped_tracer
-             (Printf.sprintf "%s was read after its transformation returned" (describe v)));
+        Error.escaped_tracer "%s was read after its transformation returned" (describe v);
       (match t.interp.concrete t.payload with
        | Some under -> to_ndarray under
        | None ->
-         raise
-           (Concretization_error
-              (Printf.sprintf
-                 "%s has no concrete value: %s only knows its type, so its data cannot \
-                  be read (e.g. for an if on a value)"
-                 (describe v)
-                 t.interp.name)))
+         Error.concretization_error
+           "%s has no concrete value: %s only knows its type, so its data cannot be read \
+            (e.g. for an if on a value)"
+           (describe v)
+           t.interp.name)
   ;;
 
   let stack_to_string () = String.concat " < " ("eval" :: List.rev_map label (stack ()))
 end
 
 module Builtin = struct
-  open Error
   open Aval
 
   let shape_str = Shape.describe
@@ -309,7 +302,7 @@ module Builtin = struct
         }
 
   let check_axes p ~rank axes =
-    Option.iter (type_error "%s: %s" (Prim.name p)) (Shape.axes_error ~rank axes)
+    Option.iter (Error.type_error "%s: %s" (Prim.name p)) (Shape.axes_error ~rank axes)
   ;;
 
   let same_types p = function
@@ -317,165 +310,192 @@ module Builtin = struct
     | x :: rest as all ->
       if List.exists (fun y -> y <> x) rest
       then
-        type_error
+        Error.type_error
           "%s: operands must have the same type, got %s"
           (Prim.name p)
           (String.concat " and " (List.map Aval.to_string all));
       x
   ;;
 
-  let one p = function
-    | [ x ] -> x
-    | l -> Prim.arity_error p ~expected:1 l
+  let unary p f = function
+    | [ x ] -> f x
+    | xs -> Prim.arity_error p ~expected:1 xs
   ;;
 
   let n_ary p n avals =
-    if List.length avals <> n then Prim.arity_error p ~expected:n avals;
+    if List.compare_length_with avals n <> 0 then Prim.arity_error p ~expected:n avals;
     same_types p avals
   ;;
 
-  let reduce p axes x =
-    let rank = Array.length x.shape in
+  let reduce_type p axes x =
+    check_axes p ~rank:(Array.length x.shape) axes;
+    Aval.create ~dtype:x.dtype (Shape.remove_dims ~axes x.shape)
+  ;;
+
+  let dot_type p avals =
+    match avals with
+    | [ ({ shape = [| m; k |]; _ } as x); ({ shape = [| k'; n |]; _ } as y) ]
+      when k = k' && x.dtype = y.dtype -> Aval.create ~dtype:x.dtype [| m; n |]
+    | [ _; _ ] ->
+      Error.type_error
+        "%s: expected [m; k] and [k; n], got %s"
+        (Prim.name p)
+        (String.concat " and " (List.map Aval.to_string avals))
+    | _ -> Prim.arity_error p ~expected:2 avals
+  ;;
+
+  let broadcast_type p ~shape ~axes x =
+    let name = Prim.name p in
+    let rank = Array.length shape in
+    if Array.length x.shape + List.length axes <> rank
+    then
+      Error.type_error
+        "%s: inserting %d axes into %s cannot give %s"
+        name
+        (List.length axes)
+        (Aval.to_string x)
+        (shape_str shape);
     check_axes p ~rank axes;
-    { x with shape = Shape.remove_dims ~axes x.shape }
+    Shape.kept_dims ~rank axes
+    |> List.mapi (fun k d -> x.shape.(k), d)
+    |> List.find_opt (fun (n, d) -> n <> shape.(d))
+    |> Option.iter (fun (_, d) ->
+      Error.type_error
+        "%s: operand %s does not match %s at dimension %d"
+        name
+        (Aval.to_string x)
+        (shape_str shape)
+        d);
+    Aval.create ~dtype:x.dtype shape
+  ;;
+
+  let transpose_type p perm x =
+    if not (Shape.is_perm ~rank:(Array.length x.shape) perm)
+    then
+      Error.type_error "%s: invalid permutation for %s" (Prim.name p) (Aval.to_string x);
+    Aval.create ~dtype:x.dtype (Array.map (Array.get x.shape) perm)
+  ;;
+
+  let reshape_type p shape x =
+    if Shape.numel shape <> Shape.numel x.shape
+    then
+      Error.type_error
+        "%s: cannot reshape %s to %s"
+        (Prim.name p)
+        (Aval.to_string x)
+        (shape_str shape);
+    Aval.create ~dtype:x.dtype shape
+  ;;
+
+  let check_axis p axis x =
+    if axis < 0 || axis >= Array.length x.shape
+    then
+      Error.type_error
+        "%s: axis %d out of range for %s"
+        (Prim.name p)
+        axis
+        (Aval.to_string x)
+  ;;
+
+  let concatenate_type p axis avals =
+    match avals with
+    | [] -> Prim.arity_error p ~expected:1 []
+    | x :: _ ->
+      check_axis p axis x;
+      let off_axis a = Shape.set_dim ~axis 0 a.shape in
+      if List.exists (fun a -> off_axis a <> off_axis x || a.dtype <> x.dtype) avals
+      then
+        Error.type_error
+          "%s: shapes must match except on axis %d, got %s"
+          (Prim.name p)
+          axis
+          (String.concat " and " (List.map Aval.to_string avals));
+      let total = List.fold_left (fun n a -> n + a.shape.(axis)) 0 avals in
+      Aval.create ~dtype:x.dtype (Shape.set_dim ~axis total x.shape)
+  ;;
+
+  let slice_type p ~axis ~start ~stop x =
+    check_axis p axis x;
+    if start < 0 || stop < start || stop > x.shape.(axis)
+    then
+      Error.type_error
+        "%s: [%d, %d) out of range for %s on axis %d"
+        (Prim.name p)
+        start
+        stop
+        (Aval.to_string x)
+        axis;
+    Aval.create ~dtype:x.dtype (Shape.set_dim ~axis (stop - start) x.shape)
   ;;
 
   let abstract_eval p avals =
-    let name = Prim.name p in
     let out =
       match p with
       | Add | Sub | Mul | Div | Max | Greater | Less -> n_ary p 2 avals
-      | Neg | Sin | Cos | Exp | Log | Sqrt | Integer_pow _ -> one p avals
+      | Neg | Sin | Cos | Exp | Log | Sqrt | Integer_pow _ -> unary p Fun.id avals
       | Select -> n_ary p 3 avals
-      | Dot ->
-        (match avals with
-         | [ ({ shape = [| m; k |]; _ } as x); ({ shape = [| k'; n |]; _ } as y) ]
-           when k = k' && x.dtype = y.dtype -> { x with shape = [| m; n |] }
-         | [ _; _ ] ->
-           type_error
-             "%s: expected [m; k] and [k; n], got %s"
-             name
-             (String.concat " and " (List.map Aval.to_string avals))
-         | _ -> Prim.arity_error p ~expected:2 avals)
-      | Reduce_sum axes | Reduce_max axes -> reduce p axes (one p avals)
-      | Broadcast { shape; axes } ->
-        let x = one p avals in
-        let rank = Array.length shape in
-        if Array.length x.shape + List.length axes <> rank
-        then
-          type_error
-            "%s: inserting %d axes into %s cannot give %s"
-            name
-            (List.length axes)
-            (Aval.to_string x)
-            (shape_str shape);
-        check_axes p ~rank axes;
-        List.iteri
-          (fun k d ->
-             if x.shape.(k) <> shape.(d)
-             then
-               type_error
-                 "%s: operand %s does not match %s at dimension %d"
-                 name
-                 (Aval.to_string x)
-                 (shape_str shape)
-                 d)
-          (Shape.kept_dims ~rank axes);
-        { x with shape }
-      | Transpose perm ->
-        let x = one p avals in
-        if not (Shape.is_perm ~rank:(Array.length x.shape) perm)
-        then type_error "%s: invalid permutation for %s" name (Aval.to_string x);
-        { x with shape = Array.map (fun i -> x.shape.(i)) perm }
-      | Reshape shape ->
-        let x = one p avals in
-        if Shape.numel shape <> Shape.numel x.shape
-        then
-          type_error
-            "%s: cannot reshape %s to %s"
-            name
-            (Aval.to_string x)
-            (shape_str shape);
-        { x with shape }
-      | Concatenate axis ->
-        (match avals with
-         | [] -> Prim.arity_error p ~expected:1 []
-         | x :: _ ->
-           let rank = Array.length x.shape in
-           if axis < 0 || axis >= rank
-           then type_error "%s: axis %d out of range for %s" name axis (Aval.to_string x);
-           let off_axis a = Array.mapi (fun d n -> if d = axis then 0 else n) a.shape in
-           if
-             List.exists
-               (fun a ->
-                  Array.length a.shape <> rank
-                  || off_axis a <> off_axis x
-                  || a.dtype <> x.dtype)
-               avals
-           then
-             type_error
-               "%s: shapes must match except on axis %d, got %s"
-               name
-               axis
-               (String.concat " and " (List.map Aval.to_string avals));
-           let shape = Array.copy x.shape in
-           shape.(axis) <- List.fold_left (fun n a -> n + a.shape.(axis)) 0 avals;
-           { x with shape })
-      | Slice { axis; start; stop } ->
-        let x = one p avals in
-        let rank = Array.length x.shape in
-        if axis < 0 || axis >= rank
-        then type_error "%s: axis %d out of range for %s" name axis (Aval.to_string x);
-        if start < 0 || stop < start || stop > x.shape.(axis)
-        then
-          type_error
-            "%s: [%d, %d) out of range for %s on axis %d"
-            name
-            start
-            stop
-            (Aval.to_string x)
-            axis;
-        let shape = Array.copy x.shape in
-        shape.(axis) <- stop - start;
-        { x with shape }
-      | _ -> invalid_arg ("Builtin.abstract_eval: not a built-in primitive: " ^ name)
+      | Dot -> dot_type p avals
+      | Reduce_sum axes | Reduce_max axes -> unary p (reduce_type p axes) avals
+      | Broadcast { shape; axes } -> unary p (broadcast_type p ~shape ~axes) avals
+      | Transpose perm -> unary p (transpose_type p perm) avals
+      | Reshape shape -> unary p (reshape_type p shape) avals
+      | Concatenate axis -> concatenate_type p axis avals
+      | Slice { axis; start; stop } -> unary p (slice_type p ~axis ~start ~stop) avals
+      | _ ->
+        invalid_arg ("Builtin.abstract_eval: not a built-in primitive: " ^ Prim.name p)
     in
     [ out ]
   ;;
 
   let impl p args =
+    let wrong_count () =
+      Error.type_error "%s: wrong operand count (%d)" (Prim.name p) (List.length args)
+    in
+    let unary f =
+      match args with
+      | [ x ] -> f x
+      | _ -> wrong_count ()
+    in
+    let binary f =
+      match args with
+      | [ x; y ] -> f x y
+      | _ -> wrong_count ()
+    in
+    let pointwise f = unary (Ndarray.map f) in
     let out =
-      match p, args with
-      | Add, [ x; y ] -> Ndarray.map2 ( +. ) x y
-      | Sub, [ x; y ] -> Ndarray.map2 ( -. ) x y
-      | Mul, [ x; y ] -> Ndarray.map2 ( *. ) x y
-      | Div, [ x; y ] -> Ndarray.map2 ( /. ) x y
-      | Max, [ x; y ] -> Ndarray.maximum x y
-      | Greater, [ x; y ] -> Ndarray.greater x y
-      | Less, [ x; y ] -> Ndarray.less x y
-      | Neg, [ x ] -> Ndarray.map Float.neg x
-      | Sin, [ x ] -> Ndarray.map Float.sin x
-      | Cos, [ x ] -> Ndarray.map Float.cos x
-      | Exp, [ x ] -> Ndarray.map Float.exp x
-      | Log, [ x ] -> Ndarray.map Float.log x
-      | Sqrt, [ x ] -> Ndarray.map Float.sqrt x
-      | Integer_pow n, [ x ] -> Ndarray.map (fun v -> Float.pow v (float n)) x
-      | Select, [ c; x; y ] -> Ndarray.select c x y
-      | Dot, [ x; y ] -> Ndarray.dot x y
-      | Reduce_sum axes, [ x ] -> Ndarray.reduce_sum ~axes x
-      | Reduce_max axes, [ x ] -> Ndarray.reduce_max ~axes x
-      | Broadcast { shape; axes }, [ x ] -> Ndarray.broadcast ~shape ~axes x
-      | Transpose perm, [ x ] -> Ndarray.transpose ~perm x
-      | Reshape shape, [ x ] -> Ndarray.reshape x shape
-      | Concatenate axis, xs -> Ndarray.concatenate ~axis xs
-      | Slice { axis; start; stop }, [ x ] -> Ndarray.slice ~axis ~start ~stop x
-      | p, args ->
-        type_error "%s: wrong operand count (%d)" (Prim.name p) (List.length args)
+      match p with
+      | Add -> binary (Ndarray.map2 ( +. ))
+      | Sub -> binary (Ndarray.map2 ( -. ))
+      | Mul -> binary (Ndarray.map2 ( *. ))
+      | Div -> binary (Ndarray.map2 ( /. ))
+      | Max -> binary Ndarray.maximum
+      | Greater -> binary Ndarray.greater
+      | Less -> binary Ndarray.less
+      | Neg -> pointwise Float.neg
+      | Sin -> pointwise Float.sin
+      | Cos -> pointwise Float.cos
+      | Exp -> pointwise Float.exp
+      | Log -> pointwise Float.log
+      | Sqrt -> pointwise Float.sqrt
+      | Integer_pow n -> pointwise (fun v -> Float.pow v (float n))
+      | Select ->
+        (match args with
+         | [ c; x; y ] -> Ndarray.select c x y
+         | _ -> wrong_count ())
+      | Dot -> binary Ndarray.dot
+      | Reduce_sum axes -> unary (Ndarray.reduce_sum ~axes)
+      | Reduce_max axes -> unary (Ndarray.reduce_max ~axes)
+      | Broadcast { shape; axes } -> unary (Ndarray.broadcast ~shape ~axes)
+      | Transpose perm -> unary (Ndarray.transpose ~perm)
+      | Reshape shape -> unary (Ndarray.reshape ~shape)
+      | Concatenate axis -> Ndarray.concatenate ~axis args
+      | Slice { axis; start; stop } -> unary (Ndarray.slice ~axis ~start ~stop)
+      | _ -> wrong_count ()
     in
     [ out ]
   ;;
 
-  let all =
+  let table =
     [ Add, "add"
     ; Sub, "sub"
     ; Mul, "mul"
@@ -502,14 +522,11 @@ module Builtin = struct
     ]
   ;;
 
-  let () = List.iter (fun (p, name) -> Prim.register p ~name ~abstract_eval ~impl) all
-  let all = List.map fst all
+  let () = List.iter (fun (p, name) -> Prim.register p ~name ~abstract_eval ~impl) table
+  let all = List.map fst table
 end
 
 module Ops = struct
-  (* Arguments evaluate right to left. *)
-
-  open Error
   module B = Builtin
 
   type value = Interp.value
@@ -522,7 +539,7 @@ module Ops = struct
     let shape = Option.value shape ~default:[| Array.length data |] in
     if Array.length data <> Shape.numel shape
     then
-      type_error
+      Error.type_error
         "Ops.array: %d elements cannot fill shape %s"
         (Array.length data)
         (Shape.to_string shape);
@@ -547,7 +564,7 @@ module Ops = struct
   let to_float v =
     let a = to_ndarray v in
     if Ndarray.rank a <> 0
-    then type_error "Ops.to_float: expected a scalar, got %s" (describe v);
+    then Error.type_error "Ops.to_float: expected a scalar, got %s" (describe v);
     Ndarray.to_float a
   ;;
 
@@ -566,16 +583,16 @@ module Ops = struct
   let pp fmt v = Format.pp_print_string fmt (to_string v)
   let bind1 = Interp.bind1
   let unop p x = bind1 p [ x ]
+  let normalize_axis ~rank axis = if axis < 0 then axis + rank else axis
   let broadcast ~shape ~axes x = unop (B.Broadcast { shape; axes }) x
   let reshape ~shape:target x = if shape x = target then x else unop (B.Reshape target) x
 
   let transpose ?perm x =
+    let reversed r = Array.init r (fun i -> r - 1 - i) in
     let perm =
       match perm with
       | Some p -> p
-      | None ->
-        let r = rank x in
-        Array.init r (fun i -> r - 1 - i)
+      | None -> reversed (rank x)
     in
     unop (B.Transpose perm) x
   ;;
@@ -584,7 +601,7 @@ module Ops = struct
     let s = shape x in
     let r = Array.length s + List.length axes in
     let axes = Shape.normalize_axes ~rank:r axes in
-    Option.iter (type_error "expand_dims: %s") (Shape.axes_error ~rank:r axes);
+    Option.iter (Error.type_error "expand_dims: %s") (Shape.axes_error ~rank:r axes);
     reshape ~shape:(Shape.insert_ones ~axes s) x
   ;;
 
@@ -594,69 +611,53 @@ module Ops = struct
     let axes =
       match axes with
       | Some axes -> Shape.normalize_axes ~rank:r axes
-      | None -> List.filter (fun d -> s.(d) = 1) (List.init r Fun.id)
+      | None -> List.filter (fun d -> s.(d) = 1) (Lists.range r)
     in
-    List.iter
-      (fun d ->
-         if d < 0 || d >= r || s.(d) <> 1
-         then type_error "squeeze: axis %d of %s is not size 1" d (shape_str s))
-      axes;
+    let not_unit d = d < 0 || d >= r || s.(d) <> 1 in
+    List.find_opt not_unit axes
+    |> Option.iter (fun d ->
+      Error.type_error "squeeze: axis %d of %s is not size 1" d (shape_str s));
     reshape ~shape:(Shape.remove_dims ~axes s) x
   ;;
 
-  (* Size-1 dims are dropped, then [Broadcast] reinserts them at full size. *)
   let broadcast_to ~shape:target x =
     let s = shape x in
-    let n = Array.length target
-    and k = Array.length s in
+    let lead = Array.length target - Array.length s in
     let fail () =
-      type_error "cannot broadcast %s to %s" (shape_str s) (shape_str target)
+      Error.type_error "cannot broadcast %s to %s" (shape_str s) (shape_str target)
     in
-    if k > n then fail ();
-    let lead = n - k in
-    let stretched = ref [] in
-    Array.iteri
-      (fun i d ->
-         let t = target.(lead + i) in
-         if d = 1 && t <> 1
-         then stretched := (lead + i) :: !stretched
-         else if d <> t
-         then fail ())
-      s;
-    let stretched = List.rev !stretched in
-    if lead = 0 && stretched = []
+    if lead < 0 then fail ();
+    let dims = List.mapi (fun i d -> lead + i, d, target.(lead + i)) (Array.to_list s) in
+    if List.exists (fun (_, d, t) -> d <> t && d <> 1) dims then fail ();
+    let new_axes, kept =
+      List.partition_map
+        (fun (i, d, t) -> if d = 1 && t <> 1 then Either.Left i else Either.Right d)
+        dims
+    in
+    if lead = 0 && new_axes = []
     then x
-    else (
-      let x =
-        if stretched = []
-        then x
-        else
-          reshape
-            ~shape:
-              (Array.of_list
-                 (List.filteri
-                    (fun i _ -> not (List.mem (lead + i) stretched))
-                    (Array.to_list s)))
-            x
-      in
-      broadcast ~shape:target ~axes:(List.init lead Fun.id @ stretched) x)
+    else
+      x
+      |> reshape ~shape:(Array.of_list kept)
+      |> broadcast ~shape:target ~axes:(Lists.range lead @ new_axes)
+  ;;
+
+  let common_shape = function
+    | [] -> Some [||]
+    | s :: rest ->
+      List.fold_left
+        (fun acc s -> Option.bind acc (Shape.broadcast_shapes s))
+        (Some s)
+        rest
   ;;
 
   let broadcast_operands p xs =
     let shapes = List.map shape xs in
-    let common =
-      List.fold_left
-        (fun acc s -> Option.bind acc (Shape.broadcast_shapes s))
-        (Some (List.hd shapes))
-        (List.tl shapes)
-    in
+    let common = common_shape shapes in
     match common with
-    | Some s ->
-      List.map
-        (fun (x, sx) -> if sx = s then x else broadcast_to ~shape:s x)
-        (List.combine xs shapes)
+    | Some s -> List.map (fun x -> if shape x = s then x else broadcast_to ~shape:s x) xs
     | None ->
-      type_error
+      Error.type_error
         "%s: cannot broadcast %s together (dims must match from the right, or be 1)"
         (Prim.name p)
         (String.concat " and " (List.map shape_str shapes))
@@ -699,7 +700,6 @@ module Ops = struct
   let sinh x = mul (scalar 0.5) (sub (exp x) (exp (neg x)))
   let cosh x = mul (scalar 0.5) (add (exp x) (exp (neg x)))
 
-  (* Avoids cancellation for large negative [x]. *)
   let asinh x =
     let a = abs x in
     let t = log (add a (sqrt (add (square a) (scalar 1.)))) in
@@ -719,15 +719,15 @@ module Ops = struct
     let r = rank x in
     let axes =
       match axes with
-      | None -> List.init r Fun.id
+      | None -> Lists.range r
       | Some axes -> Shape.normalize_axes ~rank:r axes
     in
     let y = unop (p_of axes) x in
     if keepdims
-    then (
-      let s = Array.copy (shape x) in
-      List.iter (fun d -> s.(d) <- 1) axes;
-      reshape ~shape:s y)
+    then
+      reshape
+        ~shape:(Array.mapi (fun d n -> if List.mem d axes then 1 else n) (shape x))
+        y
     else y
   ;;
 
@@ -742,17 +742,15 @@ module Ops = struct
 
   let concatenate ?(axis = 0) xs =
     match xs with
-    | [] -> type_error "concatenate: no arrays"
-    | x :: _ ->
-      let axis = if axis < 0 then axis + rank x else axis in
-      bind1 (B.Concatenate axis) xs
+    | [] -> Error.type_error "concatenate: no arrays"
+    | x :: _ -> bind1 (B.Concatenate (normalize_axis ~rank:(rank x) axis)) xs
   ;;
 
   let slice ?(axis = 0) ~start ~stop x =
     let r = rank x in
-    let axis = if axis < 0 then axis + r else axis in
+    let axis = normalize_axis ~rank:r axis in
     if axis < 0 || axis >= r
-    then type_error "slice: axis out of range for %s" (shape_str (shape x));
+    then Error.type_error "slice: axis out of range for %s" (shape_str (shape x));
     let n = (shape x).(axis) in
     let norm i = if i < 0 then i + n else i in
     bind1 (B.Slice { axis; start = norm start; stop = norm stop }) [ x ]
@@ -760,32 +758,30 @@ module Ops = struct
 
   let stack ?(axis = 0) xs =
     match xs with
-    | [] -> type_error "stack: no arrays"
+    | [] -> Error.type_error "stack: no arrays"
     | x :: _ ->
-      let axis = if axis < 0 then axis + rank x + 1 else axis in
+      let axis = normalize_axis ~rank:(rank x + 1) axis in
       concatenate ~axis (List.map (expand_dims ~axes:[ axis ]) xs)
   ;;
 
   let dot x y =
     let sx = shape x
     and sy = shape y in
-    let mismatch () =
-      type_error "dot: shapes %s and %s are not aligned" (shape_str sx) (shape_str sy)
-    in
     let mm x y = bind1 B.Dot [ x; y ] in
     match sx, sy with
-    | [| k |], [| k' |] -> if k <> k' then mismatch () else reduce_sum (mul x y)
-    | [| m; k |], [| k' |] ->
-      if k <> k'
-      then mismatch ()
-      else reshape ~shape:[| m |] (mm x (reshape ~shape:[| k; 1 |] y))
-    | [| k |], [| k'; n |] ->
-      if k <> k'
-      then mismatch ()
-      else reshape ~shape:[| n |] (mm (reshape ~shape:[| 1; k |] x) y)
-    | [| _; k |], [| k'; _ |] -> if k <> k' then mismatch () else mm x y
+    | [| k |], [| k' |] when k = k' -> reduce_sum (mul x y)
+    | [| m; k |], [| k' |] when k = k' ->
+      reshape ~shape:[| m |] (mm x (reshape ~shape:[| k; 1 |] y))
+    | [| k |], [| k'; n |] when k = k' ->
+      reshape ~shape:[| n |] (mm (reshape ~shape:[| 1; k |] x) y)
+    | [| _; k |], [| k'; _ |] when k = k' -> mm x y
+    | ([| _ |] | [| _; _ |]), ([| _ |] | [| _; _ |]) ->
+      Error.type_error
+        "dot: shapes %s and %s are not aligned"
+        (shape_str sx)
+        (shape_str sy)
     | _ ->
-      type_error
+      Error.type_error
         "dot: only rank 1 and 2 are supported, got %s and %s"
         (shape_str sx)
         (shape_str sy)
@@ -793,7 +789,6 @@ module Ops = struct
 
   let matmul = dot
 
-  (* Last, so the int operators above are not shadowed. *)
   module Infix = struct
     let ( + ) = add
     let ( - ) = sub
@@ -830,6 +825,13 @@ module Tree = struct
     | Leaf
     | Node of structure list
 
+  let rec equal_structure a b =
+    match a, b with
+    | Leaf, Leaf -> true
+    | Node xs, Node ys -> List.equal equal_structure xs ys
+    | Leaf, Node _ | Node _, Leaf -> false
+  ;;
+
   let value = Value
   let unit = Unit
   let pair a b = Pair (a, b)
@@ -844,7 +846,6 @@ module Tree = struct
       (pair a (pair b c))
   ;;
 
-  (* Leaves are accumulated in reverse. *)
   let rec flat : type a. a t -> value list -> a -> value list * structure =
     fun t acc x ->
     match t with
@@ -879,7 +880,6 @@ module Tree = struct
 
   let mismatch () = Error.type_error "Tree: the structure does not fit the description"
 
-  (* Returns the value and the leaves left over. *)
   let rec unflat : type a. a t -> structure -> value list -> a * value list =
     fun t s leaves ->
     let many a ss leaves =
@@ -933,7 +933,8 @@ module Tree = struct
   let map2 t f x y =
     let xs, s = flatten t x in
     let ys, s' = flatten t y in
-    if s <> s' then Error.type_error "Tree.map2: the two values have different structures";
+    if not (equal_structure s s')
+    then Error.type_error "Tree.map2: the two values have different structures";
     unflatten t s (List.map2 f xs ys)
   ;;
 end

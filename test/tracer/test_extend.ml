@@ -119,24 +119,35 @@ let () =
        (Ops.array ~shape:[| 2; 3 |] [| 1.; 2.; 3.; 4.; 5.; 6. |]));
   let f (x, ys) = Ops.mul x (List.fold_left Ops.add (s 0.) ys) in
   let ins = Tree.(pair value (list value)) in
-  let y, dy = Ad.jvp ins Tree.value f (s 2., [ s 3.; s 4. ]) (s 1., [ s 0.; s 1. ]) in
+  let y, dy =
+    Ad.jvp_tree
+      ~input:ins
+      ~output:Tree.value
+      f
+      (s 2., [ s 3.; s 4. ])
+      (s 1., [ s 0.; s 1. ])
+  in
   Check.float "jvp on a pair of value and list: primal" ~expected:14. (Ops.to_float y);
-  (* d = dx * (3 + 4) + x * (0 + 1) = 7 + 2 *)
   Check.float "jvp on a pair of value and list: tangent" ~expected:9. (Ops.to_float dy);
   let net { w; b } x = Ops.add (Ops.dot w x) b in
   let x = Ops.array [| 1.; 2. |] in
   let p = { w = Ops.eye 2; b = Ops.zeros [| 2 |] } in
   let dp = { w = Ops.zeros [| 2; 2 |]; b = Ops.ones [| 2 |] } in
-  let _, dy = Ad.jvp layer Tree.value (fun p -> net p x) p dp in
+  let _, dy = Ad.jvp_tree ~input:layer ~output:Tree.value (fun p -> net p x) p dp in
   Check.value "jvp on a record (Tree.conv)" ~expected:(Ops.ones [| 2 |]) dy;
   let _, dlayer =
-    Ad.jvp Tree.value layer (fun x -> { w = Ops.mul x x; b = x }) (s 3.) (s 1.)
+    Ad.jvp_tree
+      ~input:Tree.value
+      ~output:layer
+      (fun x -> { w = Ops.mul x x; b = x })
+      (s 3.)
+      (s 1.)
   in
   Check.float "jvp returning a record" ~expected:6. (Ops.to_float dlayer.w);
   Check.raises
     ~matches:Check.is_type_error
     "jvp rejects tangents of another structure"
-    (fun () -> Ad.jvp vs vs Fun.id [ s 1.; s 2. ] [ s 1. ]);
+    (fun () -> Ad.jvp_tree ~input:vs ~output:vs Fun.id [ s 1.; s 2. ] [ s 1. ]);
   Check.bool
     "Tree.map doubles every leaf"
     (List.map
@@ -162,8 +173,8 @@ let () =
   wrong_count "add, eval" (fun () -> bad_add (s 1.));
   wrong_count "sin, jvp" (fun () -> Ad.deriv bad_sin (s 1.));
   wrong_count "add, jvp" (fun () -> Ad.deriv bad_add (s 1.));
-  wrong_count "sin, vjp" (fun () -> Ad.grad1 bad_sin (s 1.));
-  wrong_count "add, vjp" (fun () -> Ad.grad1 bad_add (s 1.));
+  wrong_count "sin, vjp" (fun () -> Ad.grad bad_sin (s 1.));
+  wrong_count "add, vjp" (fun () -> Ad.grad bad_add (s 1.));
   wrong_count "concatenate of nothing" (fun () -> Interp.bind1 (Builtin.Concatenate 0) []);
   wrong_count "impl called directly" (fun () -> Prim.impl Builtin.Sin []);
   Check.raises
@@ -179,7 +190,7 @@ let () =
        Interp.bind1 M.Unregistered [ s 1. ]);
   Check.raises
     ~matches:(function
-      | Missing_rule m -> m = "jvp has no rule for softplus_ext"
+      | Error (Missing_rule m) -> m = "jvp has no rule for softplus_ext"
       | _ -> false)
     "a primitive without a jvp rule is rejected by name"
     (fun () -> Ad.deriv softplus (s 0.));
@@ -193,10 +204,8 @@ let () =
   Derivatives.register_elementwise Softplus ~partials:(fun _ xs _ ->
     List.map (fun x -> Some (fun t -> Ops.mul t (Ops.logistic x))) xs);
   Check.bool
-    "softplus_ext has jvp and vjp rules once its partials are registered"
-    (not
-       (List.mem "softplus_ext" (Jvp.missing_rules ())
-        || List.mem "softplus_ext" (Vjp.missing_rules ())));
+    "softplus_ext has a jvp rule once its partials are registered"
+    (not (List.mem "softplus_ext" (Jvp.missing_rules ())));
   un "user primitive softplus" softplus (rand ~lo:(-2.) [| 2; 3 |]);
   Check.float
     "user primitive nests: softplus'' 0 = 1/4"
@@ -205,7 +214,7 @@ let () =
   Check.float
     "user primitive, reverse over forward: grad (deriv softplus) 0 = 1/4"
     ~expected:0.25
-    (Ops.to_float (Ad.grad1 (Ad.deriv softplus) (s 0.)));
+    (Ops.to_float (Ad.grad (Ad.deriv softplus) (s 0.)));
   let i1 : int Interp.t = Interp.create ~name:"a" (fun _ -> Interp.bind)
   and i2 : int Interp.t = Interp.create ~name:"b" (fun _ -> Interp.bind) in
   Check.bool
@@ -264,8 +273,19 @@ let () =
     ~impl:(fun _ arrays -> arrays);
   Jvp.register_rule W.Wrong (fun _ primals _ ->
     primals, [ Maybe_zero.Nonzero (Ops.ones [| 2 |]) ]);
-  Vjp.register_rule W.Wrong (fun _ _ _ _ -> [ Maybe_zero.Nonzero (Ops.ones [| 2 |]) ]);
   let wrong x = Interp.bind1 W.Wrong [ x ] in
+  let module L = struct
+    type Prim.t += Wrong_t
+  end
+  in
+  Prim.register
+    L.Wrong_t
+    ~name:"wrong_transpose_ext"
+    ~abstract_eval:(fun _ avals -> avals)
+    ~impl:(fun _ arrays -> arrays);
+  Derivatives.register_linear L.Wrong_t ~transpose:(fun _ _ _ ->
+    [ Maybe_zero.Nonzero (Ops.ones [| 2 |]) ]);
+  let wrong_t x = Interp.bind1 L.Wrong_t [ x ] in
   let with_debug f =
     let saved = !Private.debug in
     Private.debug := true;
@@ -277,7 +297,116 @@ let () =
     (fun () -> with_debug (fun () -> Ad.deriv wrong (s 1.)));
   Check.raises
     ~matches:Check.is_type_error
-    "debug: a vjp rule's cotangent of the wrong type is a Type_error"
-    (fun () -> with_debug (fun () -> Ad.grad1 wrong (s 1.)));
+    "debug: a transpose rule's cotangent of the wrong type is a Type_error"
+    (fun () -> with_debug (fun () -> Ad.grad wrong_t (s 1.)));
+  let cube =
+    Define.unary
+      ~name:"cube_def"
+      ~impl:(fun x -> x *. x *. x)
+      ~deriv:(fun x t -> Ops.(t * (s 3. * x * x)))
+  in
+  let hypot =
+    Define.binary ~name:"hypot_def" ~impl:Float.hypot ~deriv:(fun x y ->
+      let r = Ops.sqrt Ops.((x * x) + (y * y)) in
+      (fun tx -> Ops.(tx * (x / r))), fun ty -> Ops.(ty * (y / r)))
+  in
+  let xs = Ops.array [| 1.; 2.; -3. |] in
+  Check.value "Define.unary evaluates" ~expected:(Ops.array [| 1.; 8.; -27. |]) (cube xs);
+  Check.value
+    "Define.unary deriv"
+    ~expected:(Ops.array [| 3.; 12.; 27. |])
+    (Ad.deriv cube xs);
+  Check.value
+    "Define.unary grad transposes its deriv"
+    ~expected:(Ops.array [| 3.; 12.; 27. |])
+    (Ad.grad (fun x -> Ops.reduce_sum (cube x)) xs);
+  Check.float
+    "Define.unary nests: cube'' 2 = 12"
+    ~expected:12.
+    (Ops.to_float (Ad.deriv (Ad.deriv cube) (s 2.)));
+  un "Define.unary cube" cube (rand ~lo:(-2.) [| 2; 3 |]);
+  let m = Ops.array ~shape:[| 2; 3 |] [| 1.; 2.; 3.; 4.; 5.; 6. |] in
+  Check.value "Define.unary vmap" ~expected:(cube m) (Vmap.vmap cube m);
+  Check.value
+    "Define.unary vmap over axis 1"
+    ~expected:(Ops.transpose (cube m))
+    (Vmap.vmap ~in_axis:1 cube m);
+  Check.value
+    "Define.unary jit"
+    ~expected:(cube m)
+    (Compile.compile ~backend:Compile.jit cube m);
+  Check.value
+    "Define.unary grad under jit"
+    ~expected:(Ad.grad (fun x -> Ops.reduce_sum (cube x)) m)
+    (Compile.compile ~backend:Compile.jit (Ad.grad (fun x -> Ops.reduce_sum (cube x))) m);
+  Check.bool
+    "Define.unary registers every rule"
+    (not
+       (List.exists
+          (fun l -> List.mem "cube_def" l)
+          [ Jvp.missing_rules (); Batching.missing_rules () ]));
+  Check.raises
+    ~matches:(function
+      | Invalid_argument _ -> true
+      | _ -> false)
+    "Define.unary rejects a taken name"
+    (fun () -> Define.unary ~name:"cube_def" ~impl:Fun.id ~deriv:(fun _ t -> t));
+  let x = Ops.array [| 3.; 5. |]
+  and y = Ops.array [| 4.; 12. |] in
+  Check.value "Define.binary evaluates" ~expected:(Ops.array [| 5.; 13. |]) (hypot x y);
+  Check.value
+    "Define.binary broadcasts like add"
+    ~expected:
+      (Ops.array ~shape:[| 2; 2 |] [| 5.; Float.hypot 3. 8.; Float.hypot 6. 4.; 10. |])
+    (hypot (Ops.array ~shape:[| 2; 1 |] [| 3.; 6. |]) (Ops.array [| 4.; 8. |]));
+  Check.value
+    "Define.binary scalar operand"
+    ~expected:(Ops.array [| 5.; Float.hypot 5. 4. |])
+    (hypot x (s 4.));
+  Check.value
+    "Define.binary deriv in x"
+    ~expected:(Ops.array [| 0.6; 5. /. 13. |])
+    (Ad.deriv (fun x -> hypot x y) x);
+  Check.value
+    "Define.binary grad in y"
+    ~expected:(Ops.array [| 0.8; 12. /. 13. |])
+    (Ad.grad (fun y -> Ops.reduce_sum (hypot x y)) y);
+  Check.float
+    "Define.binary grad through a broadcast scalar"
+    ~expected:(0.8 +. (4. /. Float.hypot 5. 4.))
+    (Ops.to_float (Ad.grad (fun t -> Ops.reduce_sum (hypot x t)) (s 4.)));
+  bin "Define.binary hypot" hypot (rand [| 2; 3 |]) (rand [| 2; 3 |]);
+  bin "Define.binary hypot, broadcast" hypot (rand [| 2; 3 |]) (rand [| 3 |]);
+  let p = Ops.array ~shape:[| 2; 2 |] [| 3.; 5.; 6.; 8. |] in
+  Check.value
+    "Define.binary vmap, one side batched"
+    ~expected:(hypot p (Ops.array [| 4.; 12. |]))
+    (Vmap.vmap (fun r -> hypot r (Ops.array [| 4.; 12. |])) p);
+  Check.value
+    "Define.binary vmap, both sides batched on different axes"
+    ~expected:(hypot p (Ops.transpose p))
+    (Vmap.vmap_tree
+       ~in_axes:[ Some 0; Some 1 ]
+       ~input:vs
+       ~output:Tree.value
+       (function
+         | [ a; b ] -> hypot a b
+         | _ -> assert false)
+       [ p; p ]);
+  Check.value
+    "Define.binary jit"
+    ~expected:(hypot p (s 4.))
+    (Compile.compile ~backend:Compile.jit (fun a -> hypot a (s 4.)) p);
+  Check.value
+    "Define.binary vmap of grad under jit"
+    ~expected:(Ops.div p (hypot p (s 4.)))
+    (Compile.compile
+       ~backend:Compile.jit
+       (Vmap.vmap (Ad.grad (fun r -> Ops.reduce_sum (hypot r (s 4.)))))
+       p);
+  Check.raises
+    ~matches:Check.is_type_error
+    "Define.binary rejects shapes that do not broadcast"
+    (fun () -> hypot (Ops.zeros [| 2 |]) (Ops.zeros [| 3 |]));
   Check.finish ()
 ;;

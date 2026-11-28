@@ -1,13 +1,11 @@
 open Common
 
-(** Primitives: an open type, extensible from outside the library. See
-    [examples/extending.ml]. *)
+(** Open type of primitives; see [examples/extending.ml]. *)
 module Prim : sig
   type t = ..
 
-  (** Registers (or replaces) [p]'s constructor; its arguments are ignored.
-      Raises [Invalid_argument] if [name] is taken. [abstract_eval] raises
-      [Type_error] on bad operands. *)
+  (** Keyed by constructor, arguments ignored. Raises [Invalid_argument] if
+      [name] is taken. *)
   val register
     :  t
     -> name:string
@@ -21,7 +19,7 @@ module Prim : sig
   val names : unit -> string list
   val arity_error : t -> expected:int -> 'a list -> 'b
 
-  (** A transformation's rules, keyed by primitive constructor. *)
+  (** Rules keyed by constructor. *)
   module Table : sig
     type prim := t
     type 'a t
@@ -37,29 +35,26 @@ module Prim : sig
   end
 end
 
-(** Values, interpreters and dispatch. An interpreter is an effect handler
-    installed by {!handle}; its own binds go to the interpreter below, with
-    eval at the bottom. *)
+(** Interpreters are effect handlers ({!handle}) stacked over eval. *)
 module Interp : sig
   type value
 
-  (** An interpreter whose tracers carry a ['p]. *)
+  (** Tracers carry a ['p]. *)
   type 'p t
 
   val of_ndarray : Ndarray.t -> value
   val aval : value -> Aval.t
   val describe : value -> string
 
-  (** Raises [Concretization_error] if some interpreter has no data (e.g.
-      staging), [Escaped_tracer] if the tracer outlived its {!handle}. *)
+  (** Raises [Concretization_error] or [Escaped_tracer]. *)
   val to_ndarray : value -> Ndarray.t
 
   val to_ndarray_opt : value -> Ndarray.t option
 
-  (** [false] for a tracer whose {!handle} returned. *)
+  (** [false] once the tracer's {!handle} returned. *)
   val alive : value -> bool
 
-  (** [concrete payload] is the value under a tracer, if any. *)
+  (** [concrete]: the value under a tracer, if any. *)
   val create
     :  name:string
     -> ?concrete:('p -> value option)
@@ -70,21 +65,20 @@ module Interp : sig
   val id : _ t -> int
   val tracer : 'p t -> Aval.t -> 'p -> value
 
-  (** [None] for arrays and tracers of other interpreters. *)
+  (** [None] if not this interpreter's tracer. *)
   val payload : 'p t -> value -> 'p option
 
   val bind : Prim.t -> value list -> value list
   val bind1 : Prim.t -> value list -> value
 
-  (** Not domain-safe: tracer liveness is a counter on [i]. *)
+  (** Not domain-safe. *)
   val handle : _ t -> (unit -> 'a) -> 'a
 
   (** e.g. ["eval < jvp#3 < jvp#7"]. *)
   val stack_to_string : unit -> string
 end
 
-(** The built-in primitives; everything else in [Ops] is composed from
-    them. *)
+(** Built-in primitives; [Ops] is built on them. *)
 module Builtin : sig
   type Prim.t +=
     | Add
@@ -122,8 +116,7 @@ module Builtin : sig
   val all : Prim.t list
 end
 
-(** Array ops; they work under every interpreter. Binary ops broadcast like
-    NumPy; comparisons return 1.0/0.0 masks. *)
+(** Binary ops broadcast like NumPy; comparisons return 1.0/0.0. *)
 module Ops : sig
   type value = Interp.value
 
@@ -147,7 +140,7 @@ module Ops : sig
   val to_array : value -> float array
   val allclose : ?rtol:float -> ?atol:float -> value -> value -> bool
 
-  (** Never raises: describes tracers. *)
+  (** Never raises. *)
   val to_string : value -> string
 
   val describe : value -> string
@@ -184,7 +177,7 @@ module Ops : sig
   val equal : value -> value -> value
   val not_equal : value -> value -> value
 
-  (** [select p a b] is [a] where [p > 0], else [b]. *)
+  (** [a] where [p > 0], else [b]. *)
   val select : value -> value -> value -> value
 
   (** [axes] default to all. *)
@@ -198,18 +191,22 @@ module Ops : sig
   val squeeze : ?axes:int list -> value -> value
   val transpose : ?perm:int array -> value -> value
 
-  (** Inserts dims at [axes], repeating the data. *)
+  (** Inserts dims at [axes]. *)
   val broadcast : shape:int array -> axes:int list -> value -> value
 
   val broadcast_to : shape:int array -> value -> value
+
+  (** To a common shape; [p] names errors. *)
+  val broadcast_operands : Prim.t -> value list -> value list
+
   val concatenate : ?axis:int -> value list -> value
 
-  (** [[start, stop)] along [axis]; negative indices count from the end. *)
+  (** From [start] to [stop] (exclusive); negative from the end. *)
   val slice : ?axis:int -> start:int -> stop:int -> value -> value
 
   val stack : ?axis:int -> value list -> value
 
-  (** Rank 1 and 2 operands. *)
+  (** Rank 1 or 2. *)
   val dot : value -> value -> value
 
   val matmul : value -> value -> value
@@ -230,7 +227,7 @@ module Ops : sig
   include module type of Infix
 end
 
-(** Structured arguments for transformations (JAX's pytrees). *)
+(** JAX's pytrees. *)
 module Tree : sig
   type value := Interp.value
   type 'a t
@@ -243,12 +240,13 @@ module Tree : sig
   val array : 'a t -> 'a array t
   val conv : to_tree:('b -> 'a) -> of_tree:('a -> 'b) -> 'a t -> 'b t
 
-  (** A tree without its leaves (JAX's treedef); comparable with [=]. *)
+  (** Treedef. *)
   type structure
 
+  val equal_structure : structure -> structure -> bool
   val flatten : 'a t -> 'a -> value list * structure
 
-  (** Raises [Type_error] if the leaves do not fit. *)
+  (** Raises [Type_error]. *)
   val unflatten : 'a t -> structure -> value list -> 'a
 
   val leaves : 'a t -> 'a -> value list
@@ -265,6 +263,6 @@ module Tree : sig
   val num_leaves : structure -> int
   val map : 'a t -> (value -> value) -> 'a -> 'a
 
-  (** Raises [Type_error] on different structures. *)
+  (** Raises [Type_error]. *)
   val map2 : 'a t -> (value -> value -> value) -> 'a -> 'a -> 'a
 end

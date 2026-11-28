@@ -8,11 +8,10 @@ let vs = Tree.(list value)
 let inner a b = Ops.to_float (Ops.reduce_sum (Ops.mul a b))
 let sum_inner xs ys = List.fold_left2 (fun acc a b -> acc +. inner a b) 0. xs ys
 
-(* <ct, J dx> = <J^T ct, dx>: reverse mode against forward mode. *)
 let dot_check name f xs =
   let dxs = List.map (fun x -> rand ~lo:(-1.) ~hi:1. (Ops.shape x)) xs in
-  let ys, dys = Ad.jvp vs vs f xs dxs in
-  let ys', back = Ad.vjp vs vs f xs in
+  let ys, dys = Ad.jvp_tree ~input:vs ~output:vs f xs dxs in
+  let ys', back = Ad.vjp_tree ~input:vs ~output:vs f xs in
   List.iter2 (fun a b -> Check.value ("vjp primal " ^ name) ~expected:a b) ys ys';
   let cts = List.map (fun y -> rand ~lo:(-1.) ~hi:1. (Ops.shape y)) ys in
   let cxs = back cts in
@@ -136,7 +135,7 @@ let () =
     [ a () ];
   let x = Ops.array [| 0.; 1.; 2. |] in
   let f x = Ops.(reduce_sum (sin x * x)) in
-  let y, g = Ad.value_and_grad Tree.value f x in
+  let y, g = Ad.value_and_grad_tree ~wrt:Tree.value f x in
   Check.float "value_and_grad: value" ~expected:(Ops.to_float (f x)) (Ops.to_float y);
   Check.value
     "grad (sum (x sin x)) = sin x + x cos x"
@@ -153,12 +152,12 @@ let () =
   Check.value
     "grad of an unused input is zeros"
     ~expected:(Ops.zeros [| 3 |])
-    (Ad.grad1 (fun _ -> s 1.) x);
+    (Ad.grad (fun _ -> s 1.) x);
   Check.value
     "grad at ties splits like jvp (relu at 0)"
     ~expected:(Ops.array [| 0.; 0.5; 1. |])
-    (Ad.grad1 (fun x -> Ops.reduce_sum (Ops.relu (Ops.sub x (s 1.)))) x);
-  let back = snd (Ad.vjp Tree.value Tree.value Ops.sin x) in
+    (Ad.grad (fun x -> Ops.reduce_sum (Ops.relu (Ops.sub x (s 1.)))) x);
+  let back = snd (Ad.vjp_tree ~input:Tree.value ~output:Tree.value Ops.sin x) in
   Check.value
     "back can be called twice"
     ~expected:(back (Ops.ones [| 3 |]))
@@ -166,7 +165,7 @@ let () =
   let kept f =
     let w = Weak.create 1 in
     let _, back =
-      Ad.vjp1
+      Ad.vjp
         (fun x ->
            let y, out = f x in
            Weak.set w 0 (Some (Ops.to_ndarray y));
@@ -179,10 +178,10 @@ let () =
     alive
   in
   Check.bool
-    "back keeps an intermediate its rule reads"
+    "back keeps a residual its linear function reads"
     (kept (fun x ->
        let y = Ops.add x x in
-       y, Ops.sin y));
+       y, Ops.mul y x));
   Check.bool
     "back drops an intermediate a linear rule does not read"
     (not
@@ -200,10 +199,7 @@ let () =
   let m = rand [| 2; 2 |] in
   let h x = Ops.(exp (dot x x)) in
   Check.value "jacrev = jacfwd on a matrix" ~expected:(Ad.jacfwd h m) (Ad.jacrev h m);
-  Check.value
-    "jacrev of a scalar function = grad"
-    ~expected:(Ad.grad1 f x)
-    (Ad.jacrev f x);
+  Check.value "jacrev of a scalar function = grad" ~expected:(Ad.grad f x) (Ad.jacrev f x);
   let hs = Ad.hessian (fun x -> Ops.(reduce_sum (x * x * x) * reduce_sum (sin x))) x in
   Check.value "hessian is symmetric" ~expected:(Ops.transpose hs) hs;
   Check.value
@@ -215,29 +211,28 @@ let () =
   Check.value
     "reverse over reverse: grad (sum (grad sum x^3)) = 6x"
     ~expected:Ops.(scalar 6. * p)
-    (Ad.grad1 (fun x -> Ops.reduce_sum (Ad.grad1 cube x)) p);
+    (Ad.grad (fun x -> Ops.reduce_sum (Ad.grad cube x)) p);
   Check.value
     "reverse over forward: grad (sum (deriv sin)) = -sin"
     ~expected:(Ops.neg (Ops.sin x))
-    (Ad.grad1 (fun x -> Ops.reduce_sum (Ad.deriv Ops.sin x)) x);
+    (Ad.grad (fun x -> Ops.reduce_sum (Ad.deriv Ops.sin x)) x);
   Check.float
     "forward over reverse: deriv (grad sin) 1 = -sin 1"
     ~expected:(-.Float.sin 1.)
-    (Ops.to_float (Ad.deriv (Ad.grad1 Ops.sin) (s 1.)));
+    (Ops.to_float (Ad.deriv (Ad.grad Ops.sin) (s 1.)));
   Check.float
     "third order: grad (grad (grad x^4)) 2 = 48"
     ~expected:48.
-    (Ops.to_float Ad.(grad1 (grad1 (grad1 (Ops.integer_pow ~exponent:4))) (s 2.)));
-  (* Perturbation confusion: d/dx (x * d/dy (x + y)) = 1. *)
+    (Ops.to_float Ad.(grad (grad (grad (Ops.integer_pow ~exponent:4))) (s 2.)));
   Check.float
     "no perturbation confusion"
     ~expected:1.
     (Ops.to_float
-       (Ad.grad1 (fun x -> Ops.mul x (Ad.grad1 (fun y -> Ops.add x y) (s 1.))) (s 1.)));
+       (Ad.grad (fun x -> Ops.mul x (Ad.grad (fun y -> Ops.add x y) (s 1.))) (s 1.)));
   let w = Ops.array ~shape:[| 2; 3 |] [| 1.; 2.; 3.; 4.; 5.; 6. |] in
   let b = Ops.array [| 0.5; -1. |] in
   let loss (w, b) = Ops.(mean (square (matmul w x + b))) in
-  let gw, gb = Ad.grad Tree.(pair value value) loss (w, b) in
+  let gw, gb = Ad.grad_tree ~wrt:Tree.(pair value value) loss (w, b) in
   let r = Ops.array [| 8.5; 16. |] in
   Check.value "grad on a pair: b" ~expected:r gb;
   Check.value
@@ -245,11 +240,15 @@ let () =
     ~expected:Ops.(expand_dims ~axes:[ 1 ] r * expand_dims ~axes:[ 0 ] x)
     gw;
   let net { w; b } = Ops.(reduce_sum (dot w x + b)) in
-  let gl = Ad.grad layer net { w; b } in
+  let gl = Ad.grad_tree ~wrt:layer net { w; b } in
   Check.value "grad on a record: b" ~expected:(Ops.ones [| 2 |]) gl.b;
   Check.value "grad on a record: w" ~expected:(Ops.stack [ x; x ]) gl.w;
   let ys, back =
-    Ad.vjp Tree.value Tree.(pair value value) (fun x -> Ops.sin x, Ops.cos x) x
+    Ad.vjp_tree
+      ~input:Tree.value
+      ~output:Tree.(pair value value)
+      (fun x -> Ops.sin x, Ops.cos x)
+      x
   in
   Check.value "vjp with a pair out: primal" ~expected:(Ops.cos x) (snd ys);
   Check.value
@@ -257,7 +256,7 @@ let () =
     ~expected:Ops.(cos x - sin x)
     (back (Ops.ones [| 3 |], Ops.ones [| 3 |]));
   Check.raises ~matches:Check.is_type_error "grad rejects a non-scalar output" (fun () ->
-    Ad.grad1 Ops.sin x);
+    Ad.grad Ops.sin x);
   Check.raises
     ~matches:Check.is_type_error
     "back rejects a cotangent of another shape"
@@ -268,25 +267,144 @@ let () =
     (fun () -> Ops.slice ~start:0 ~stop:4 x);
   Check.raises
     ~matches:(function
-      | Missing_rule m -> m = "vjp has no rule for softplus_vjp"
+      | Error (Missing_rule m) -> m = "jvp has no rule for softplus_vjp"
       | _ -> false)
-    "a primitive without a vjp rule is rejected by name"
-    (fun () -> Ad.grad1 softplus (s 0.));
-  Check.bool
-    "missing_rules lists softplus_vjp"
-    (List.mem "softplus_vjp" (Vjp.missing_rules ()));
+    "grad of a primitive without a jvp rule is rejected by name"
+    (fun () -> Ad.grad softplus (s 0.));
   Derivatives.register_elementwise Softplus ~partials:(fun _ xs _ ->
     List.map (fun x -> Some (fun t -> Ops.mul t (Ops.logistic x))) xs);
-  Check.bool
-    "softplus_vjp has a vjp rule once its partials are registered"
-    (not (List.mem "softplus_vjp" (Vjp.missing_rules ())));
   Check.float
     "user primitive: grad softplus 0 = 1/2"
     ~expected:0.5
-    (Ops.to_float (Ad.grad1 softplus (s 0.)));
+    (Ops.to_float (Ad.grad softplus (s 0.)));
   Check.float
     "user primitive nests: grad (grad softplus) 0 = 1/4"
     ~expected:0.25
-    (Ops.to_float (Ad.grad1 (Ad.grad1 softplus) (s 0.)));
+    (Ops.to_float (Ad.grad (Ad.grad softplus) (s 0.)));
+  Check.finish ()
+;;
+
+let fd_grad_check ?(eps = 1e-6) name f x =
+  let v = rand ~lo:(-1.) ~hi:1. (Ops.shape x) in
+  let at t = Ops.to_float (f Ops.(x + (scalar t * v))) in
+  Check.float
+    ~rtol:1e-6
+    ~atol:1e-6
+    name
+    ~expected:((at eps -. at (-.eps)) /. (2. *. eps))
+    (inner (Ad.grad f x) v)
+;;
+
+type Prim.t += Triple
+
+let triple x = Interp.bind1 Triple [ x ]
+
+let () =
+  Prim.register
+    Triple
+    ~name:"triple_vjp"
+    ~abstract_eval:(fun _ avals -> avals)
+    ~impl:(fun _ -> List.map (Ndarray.map (fun x -> 3. *. x)))
+;;
+
+let () =
+  let x = rand ~lo:(-1.) ~hi:1. [| 4 |] in
+  let f x =
+    Ops.(
+      reduce_sum (tanh (x * x) + (exp (sin x) / (scalar 2. + cos x)))
+      - mean (sqrt ((x * x) + scalar 1.)))
+  in
+  fd_grad_check "grad of a multi-op function = finite differences" f x;
+  let m = rand [| 3; 4 |] in
+  fd_grad_check
+    "grad through dot, broadcast and reduce_max = finite differences"
+    (fun x -> Ops.(reduce_max (logistic (dot m x + scalar 0.5)) * reduce_sum x))
+    x;
+  let y = s 0.7 in
+  Check.float
+    "grad (grad (sin x * x)) = 2 cos x - x sin x"
+    ~expected:((2. *. Float.cos 0.7) -. (0.7 *. Float.sin 0.7))
+    (Ops.to_float (Ad.grad (Ad.grad Ops.(fun x -> sin x * x)) y));
+  let h x = Ops.(reduce_sum (x * x * sin x)) in
+  let dx = rand ~lo:(-1.) ~hi:1. [| 4 |] in
+  let _, hv = Ad.jvp (Ad.grad h) x dx in
+  Check.value "jvp (grad f) = hessian f . dx" ~expected:(Ops.dot (Ad.hessian h x) dx) hv;
+  let c x =
+    Control.cond
+      Ops.(reduce_sum x)
+      ~then_:Ops.(fun x -> reduce_sum (sin x * x))
+      ~else_:Ops.(fun x -> reduce_sum (exp x))
+      x
+  in
+  fd_grad_check "grad through cond, then = finite differences" c (Ops.abs x);
+  fd_grad_check "grad through cond, else = finite differences" c (Ops.neg (Ops.abs x));
+  Check.value
+    "grad (grad through cond) = grad grad of the branch"
+    ~expected:Ops.((scalar 2. * cos y) - (y * sin y))
+    (Ad.grad
+       (Ad.grad (fun x -> Control.cond x ~then_:Ops.(fun x -> sin x * x) ~else_:Ops.exp x))
+       y);
+  let nested x =
+    Control.cond
+      Ops.(reduce_sum x)
+      ~then_:(fun x ->
+        Control.cond
+          Ops.(reduce_sum x - scalar 100.)
+          ~then_:Ops.reduce_sum
+          ~else_:Ops.(fun x -> reduce_sum (sin x * x))
+          x)
+      ~else_:Ops.(fun x -> reduce_sum (exp x))
+      x
+  in
+  fd_grad_check "grad through nested conds = finite differences" nested (Ops.abs x);
+  Check.value
+    "grad (grad through nested conds) = grad grad of the branch"
+    ~expected:Ops.((scalar 2. * cos y) - (y * sin y))
+    (Ad.grad (Ad.grad (fun y -> nested (Ops.reshape ~shape:[| 1 |] y))) y);
+  let traces = ref 0 in
+  let fast =
+    Compile.compile ~backend:(Compile.jit_with ~on_trace:(fun _ -> incr traces)) f
+  in
+  Check.value "grad through jit = grad" ~expected:(Ad.grad f x) (Ad.grad fast x);
+  Check.value "grad through jit, again" ~expected:(Ad.grad f x) (Ad.grad fast x);
+  Check.bool "grad through jit traces once" (!traces = 1);
+  Check.value
+    "jit of grad = grad"
+    ~expected:(Ad.grad f x)
+    (Compile.compile ~backend:Compile.jit (Ad.grad f) x);
+  let _, (), lin = Vjp.linearize (fun xs -> List.map Ops.sin xs, ()) [ x ] in
+  Check.bool
+    "the linear function of sin has only linear ops"
+    (List.for_all
+       (fun (e : Linear.eqn) ->
+          not (List.mem (Prim.name e.prim) (Transpose.missing_rules ())))
+       lin.eqns);
+  Jvp.register_rule Triple (fun p xs dxs ->
+    ( [ Interp.bind1 p xs ]
+    , List.map2
+        (fun x dx -> Maybe_zero.map ~like:x (fun t -> Interp.bind1 p [ t ]) dx)
+        xs
+        dxs ));
+  Check.raises
+    ~matches:(function
+      | Error (Missing_rule m) -> m = "transpose has no rule for triple_vjp"
+      | _ -> false)
+    "grad of a linear primitive without a transpose rule is rejected by name"
+    (fun () -> Ad.grad triple (s 1.));
+  Check.bool
+    "Transpose.missing_rules lists triple_vjp"
+    (List.mem "triple_vjp" (Transpose.missing_rules ()));
+  Transpose.register_rule Triple (fun p _ cts ->
+    List.map
+      (fun c -> Maybe_zero.map ~like:(Ops.scalar 0.) (fun c -> Interp.bind1 p [ c ]) c)
+      cts);
+  Check.float
+    "jvp + transpose rules give a gradient"
+    ~expected:6.
+    (Ops.to_float (Ad.grad (fun x -> Ops.mul x (triple x)) (s 1.)));
+  Check.value
+    "jvp + transpose rules: jacrev = jacfwd"
+    ~expected:(Ad.jacfwd triple x)
+    (Ad.jacrev triple x);
   Check.finish ()
 ;;
