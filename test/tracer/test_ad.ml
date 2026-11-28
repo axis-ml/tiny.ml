@@ -123,6 +123,17 @@ module _ : module type of Ad = struct
 
   let grad = Ad.grad
   let () = Check.value "jacrev matches jacfwd" ~expected:(Ad.jacfwd g x) (Ad.jacrev g x)
+
+  let () =
+    let empty = Ops.zeros [| 0 |] in
+    let to_3 x = Ops.(reduce_sum x + zeros [| 3 |]) in
+    Check.bool "jacfwd of an empty input" (Ops.shape (Ad.jacfwd to_3 empty) = [| 3; 0 |]);
+    Check.bool "jacrev of an empty input" (Ops.shape (Ad.jacrev to_3 empty) = [| 3; 0 |]);
+    Check.bool
+      "jacrev of an empty output"
+      (Ops.shape (Ad.jacrev (fun _ -> empty) (Ops.zeros [| 2 |])) = [| 0; 2 |])
+  ;;
+
   let jacrev = Ad.jacrev
 
   let () =

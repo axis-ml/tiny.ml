@@ -627,12 +627,20 @@ module Ad = struct
   ;;
 
   let jacobian ~axis ~out x rows =
-    Ops.stack ~axis rows |> Ops.reshape ~shape:(Array.append out (Ops.shape x))
+    let shape = Array.append out (Ops.shape x) in
+    match rows with
+    | [] -> Ops.zeros shape
+    | rows -> Ops.stack ~axis rows |> Ops.reshape ~shape
   ;;
 
   let jacfwd f x =
     let cols = List.init (Ops.size x) (fun i -> jvp f x (basis x i) |> snd) in
-    jacobian ~axis:(-1) ~out:(Ops.shape (List.hd cols)) x cols
+    let out =
+      match cols with
+      | col :: _ -> Ops.shape col
+      | [] -> Ops.shape (f x)
+    in
+    jacobian ~axis:(-1) ~out x cols
   ;;
 
   let vjp_tree ~input:in_tree ~output:out_tree f x =

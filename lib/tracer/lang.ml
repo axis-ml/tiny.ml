@@ -180,8 +180,7 @@ module Interp = struct
     let outs = Prim.impl prim arrays in
     if not (List.map Aval.of_ndarray outs |> List.equal Aval.equal expected)
     then
-      Printf.ksprintf
-        failwith
+      Error.type_error
         "%s: impl and abstract_eval disagree on the output type"
         (Prim.name prim);
     List.map of_ndarray outs
