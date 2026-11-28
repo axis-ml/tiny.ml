@@ -23,7 +23,7 @@
   "Write numeric code once in OCaml, then evaluate it or differentiate it with forward-mode autodiff.")
  (depends
   (ocaml (>= 5.0))
-  (ppxlib (>= 0.35))
+  (ppxlib (and (>= 0.35) (< 0.36)))
   (ocamlformat
    (and
     :with-dev-setup

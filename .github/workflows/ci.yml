@@ -25,7 +25,7 @@ jobs:
       # Caches the bare compiler switch in ./_opam and dune's build cache.
       - uses: ocaml/setup-ocaml@v3
         with:
-          ocaml-compiler: "5.4"
+          ocaml-compiler: "5.3"
 
       # setup-ocaml's cache holds only the compiler; restoring the full switch
       # on top of it also keeps the deps and ocamlformat (~3 min to build).
