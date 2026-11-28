@@ -1,7 +1,8 @@
 open Common
 open Lang
 
-(** Tangents and cotangents with symbolic zeros. *)
+(** Tangents and cotangents with symbolic zeros, so known-zero derivatives
+    cost nothing. *)
 module Maybe_zero : sig
   type value := Interp.value
 
@@ -9,18 +10,25 @@ module Maybe_zero : sig
     | Zero of Aval.t
     | Nonzero of value
 
+  (** [Zero] with the type of the argument. *)
   val zero_like : value -> t
+
   val nonzero : value -> t
   val is_zero : t -> bool
+
+  (** A real value; [Zero] becomes an array of zeros. *)
   val instantiate : t -> value
 
   (** Zeros stay zero, typed like [like]. *)
   val map : like:value -> (value -> value) -> t -> t
 
+  (** Skips the op when an operand is [Zero]. *)
   val add : like:value -> t -> t -> t
+
   val sub : like:value -> t -> t -> t
 end
 
+(** Forward mode: carries a tangent next to every value. *)
 module Jvp : sig
   type value := Interp.value
 
@@ -28,8 +36,11 @@ module Jvp : sig
   type rule = Prim.t -> value list -> Maybe_zero.t list -> value list * Maybe_zero.t list
 
   val register_rule : Prim.t -> rule -> unit
+
+  (** Registered primitives with no jvp rule. *)
   val missing_rules : unit -> string list
 
+  (** [jvp_flat f primals tangents] is [(outputs, output tangents, aux)]. *)
   val jvp_flat
     :  (value list -> value list * 'aux)
     -> value list
@@ -65,6 +76,8 @@ module Linear : sig
     ; num_vars : int
     }
 
+  (** How an input enters: [Linear] (the tangent, unknown) or [Fixed]
+      (known now). *)
   type operand =
     | Linear of Aval.t
     | Fixed of value
@@ -89,7 +102,7 @@ module Partial_eval : sig
   val trace : (value list -> value list * 'aux) -> Linear.operand list -> Linear.t * 'aux
 end
 
-(** Only linear primitives need a rule. *)
+(** Runs a linear function backwards. Only linear primitives need a rule. *)
 module Transpose : sig
   type value := Interp.value
 
@@ -97,14 +110,16 @@ module Transpose : sig
   type rule = Prim.t -> Linear.operand list -> Maybe_zero.t list -> Maybe_zero.t list
 
   val register_rule : Prim.t -> rule -> unit
+
+  (** Registered primitives with no transpose rule. *)
   val missing_rules : unit -> string list
 
   (** Output cotangents to input ones. *)
   val transpose : Linear.t -> value list -> value list
 end
 
-(** jvp + partial eval + transpose. Needs a jvp rule, and a transpose
-    rule if the tangent uses the primitive. *)
+(** Reverse mode = jvp + partial eval + transpose. Needs a jvp rule, and a
+    transpose rule if the tangent uses the primitive. *)
 module Vjp : sig
   type value := Interp.value
 
@@ -125,7 +140,8 @@ end
 module Derivatives : sig
   type value := Interp.value
 
-  (** Per operand [Some (t -> t * dy/dx_i)], [None] if zero. *)
+  (** [partials p operands output]: per operand [Some (t -> t * dy/dx_i)],
+      [None] if zero. *)
   type partials = Prim.t -> value list -> value -> (value -> value) option list
 
   (** Partials must be linear in [t]; reverse mode then comes free. *)
@@ -145,22 +161,32 @@ module Derivatives : sig
   val register_multilinear : Prim.t -> transpose:transpose -> unit
 end
 
-(** Nesting transformations. [_tree] forms take {!Tree} descriptions. *)
+(** Derivatives of your functions. Transformations nest, e.g.
+    [grad (grad f)]. [_tree] forms take {!Tree} descriptions.
+
+    {[
+      let f x = Ops.(sin x * x)
+      let df = Ad.grad f (Ops.scalar 1.)  (* cos 1 + sin 1 *)
+    ]} *)
 module Ad : sig
   type value := Interp.value
 
-  (** [(f x, df(x) dx)]. *)
+  (** Forward mode: [jvp f x dx] is [(f x, df(x) dx)], the output and how it
+      moves when [x] moves along [dx]. *)
   val jvp : (value -> value) -> value -> value -> value * value
 
   val jvp_tree : input:'a Tree.t -> output:'b Tree.t -> ('a -> 'b) -> 'a -> 'a -> 'b * 'b
 
-  (** Tangent along ones. *)
+  (** Tangent along ones: [f'(x)] for scalar [x]; elementwise derivative for
+      elementwise [f]. *)
   val deriv : (value -> value) -> value -> value
 
-  (** Shape [shape (f x) @ shape x]. *)
+  (** Full Jacobian by forward mode (one [jvp] per input element). Shape
+      [shape (f x) @ shape x]. *)
   val jacfwd : (value -> value) -> value -> value
 
-  (** [(f x, back)]; call [back] inside enclosing transformations. *)
+  (** Reverse mode: [(f x, back)], [back dy] is [dy] pulled back to [x]'s
+      shape. Call [back] inside enclosing transformations. *)
   val vjp : (value -> value) -> value -> value * (value -> value)
 
   val vjp_tree
@@ -170,12 +196,21 @@ module Ad : sig
     -> 'a
     -> 'b * ('b -> 'a)
 
-  (** [f] returns a scalar. *)
+  (** [(f x, grad f x)] in one pass. [f] returns a scalar. *)
   val value_and_grad : (value -> value) -> value -> value * value
 
+  (** Gradient for every leaf of [wrt], e.g. all model parameters. *)
   val value_and_grad_tree : wrt:'a Tree.t -> ('a -> value) -> 'a -> value * 'a
+
+  (** Gradient of a scalar [f], same shape as [x]. *)
   val grad : (value -> value) -> value -> value
+
   val grad_tree : wrt:'a Tree.t -> ('a -> value) -> 'a -> 'a
+
+  (** Same as {!jacfwd} by reverse mode (one [vjp] per output element);
+      cheaper when the output is smaller than the input. *)
   val jacrev : (value -> value) -> value -> value
+
+  (** Second derivatives of a scalar [f]: [jacfwd (grad f)]. *)
   val hessian : (value -> value) -> value -> value
 end

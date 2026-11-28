@@ -1,7 +1,13 @@
 open Common
 open Lang
 
-(** A traced DAG (JAX's jaxpr). Only types are known while tracing. *)
+(** A traced DAG (JAX's jaxpr). Only types are known while tracing, so [f]
+    cannot read data or branch on it with OCaml [if] (use {!Control}).
+
+    {[
+      let g = Ir.make (fun x -> Ops.(sin x * x)) (Ops.scalar 1.) in
+      print_endline (Ir.to_string g)
+    ]} *)
 module Ir : sig
   type value := Interp.value
 
@@ -10,6 +16,7 @@ module Ir : sig
     ; aval : Aval.t
     }
 
+  (** One primitive call. *)
   type eqn = private
     { prim : Prim.t
     ; inputs : var list
@@ -28,12 +35,16 @@ module Ir : sig
     ; num_vars : int
     }
 
+  (** Traces [f] with inputs of the given types. *)
   val trace : (value list -> value list) -> Aval.t list -> t
+
+  (** [trace], also returning [f]'s extra result. *)
   val trace_aux : (value list -> value list * 'a) -> Aval.t list -> t * 'a
 
   (** Traces at [x]'s type. *)
   val make : (value -> value) -> value -> t
 
+  (** Traces at the type of each leaf of [x]. *)
   val make_tree : input:'a Tree.t -> output:'b Tree.t -> ('a -> 'b) -> 'a -> t
 
   (** Captures become leading params; returns their values. *)
@@ -42,29 +53,32 @@ module Ir : sig
   (** Raises [Failure] if ill-formed. *)
   val invariant : t -> unit
 
-  (** Works under every interpreter. *)
+  (** Replays the graph on [params]. Works under every interpreter. *)
   val run : t -> value list -> value list
 
+  (** [run] with one param and one output. *)
   val run1 : t -> value -> value
 
   (** {2 Inspection} *)
 
-  (** By var id. *)
+  (** By var id: the eqn computing it ([None] for params, captures, consts). *)
   val producers : t -> eqn option array
 
-  (** By var id. *)
+  (** By var id: the eqns reading it. *)
   val users : t -> eqn list array
 
   (** Eqns no output needs (still run). *)
   val dead : t -> eqn list
 
-  (** e.g. a cond's branches. *)
+  (** Graphs inside a primitive, e.g. a cond's branches. *)
   val sub_graphs : Prim.t -> (string * t) list
 
   (** Lets [invariant], [to_string], [to_dot] see inside. *)
   val register_sub_graphs : Prim.t -> (Prim.t -> (string * t) list) -> unit
 
+  (** Text form, one eqn per line. *)
   val to_string : t -> string
+
   val pp : Format.formatter -> t -> unit
 
   (** Graphviz; dead eqns dashed. *)
@@ -110,6 +124,7 @@ module Compile : sig
   type value := Interp.value
 
   module type Backend = sig
+    (** e.g. ["jit"]. *)
     val name : string
 
     (** Once per input structure. *)
@@ -125,15 +140,19 @@ module Compile : sig
         ; graph : Ir.t
         }
 
+  (** Just calls the function. *)
   val eager : backend
 
   (** Caches a [Call] per input avals. Free arrays are baked in; graphs
       capturing tracers are retraced each call. *)
   val jit : backend
 
+  (** {!jit}, calling [on_trace] on each new graph (e.g. to count or print
+      traces). *)
   val jit_with : on_trace:(Ir.t -> unit) -> backend
 
-  (** [backend] defaults to {!eager}. *)
+  (** [backend] defaults to {!eager}. Keep the returned function to reuse
+      its cache: [let f' = compile ~backend:jit f]. *)
   val compile : ?backend:backend -> (value -> value) -> value -> value
 
   val compile_tree
@@ -173,9 +192,11 @@ module Control : sig
     -> 'a
     -> 'b
 
-  (** While [cond carry > 0]. No [vjp] ([Missing_rule]). *)
+  (** [carry <- body carry] while [cond carry > 0]; returns the last carry.
+      No [vjp] ([Missing_rule]). *)
   val while_loop : cond:(value -> value) -> body:(value -> value) -> value -> value
 
+  (** [carry] describes the loop state, e.g. [Tree.(pair value value)]. *)
   val while_loop_tree
     :  carry:'a Tree.t
     -> cond:('a -> value)
