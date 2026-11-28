@@ -1,0 +1,35 @@
+{0 tiny.ml}
+
+A small JAX-style ML framework for OCaml: write numeric code once, then run,
+differentiate, batch or compile it.
+
+{[
+  open Tracer
+
+  let f x = Ops.(-(sin x * scalar 2.) + x)
+
+  let () =
+    let x = Ops.scalar 3. in
+    print_endline (Ops.to_string (Ad.deriv f x));
+    print_endline (Ops.to_string (Vmap.vmap (Ad.grad f) (Ops.array [| 0.; 3. |])))
+]}
+
+{1 Libraries}
+
+{ul
+{- {!Tracer} ([tiny_ml.tracer]): the library. Start here.}
+{- {!Ppx_tracer} ([tiny_ml.ppx_tracer], optional): [let%ops], [[%ops ...]],
+   [[@@deriving tree]] and [[%tree: ...]].}}
+
+{1 Where to look}
+
+{ul
+{- {!Tracer.Ops}: n-d float64 arrays, broadcasting, reductions, shape ops.}
+{- {!Tracer.Ad}: [jvp], [deriv], [jacfwd], [vjp], [grad], [jacrev], [hessian].}
+{- {!Tracer.Vmap}: batching with [in_axes] / [out_axis].}
+{- {!Tracer.Tree}: pytrees; every transformation has a [_tree] form.}
+{- {!Tracer.Ir} and {!Tracer.Compile}: trace to a graph; [jit].}
+{- {!Tracer.Control}: [cond] and [while_loop].}
+{- {!Tracer.Expert}: new primitives, interpreters and rules.}}
+
+Errors are raised as {!Tracer.Error}; use {!Tracer.catch} for a [result].

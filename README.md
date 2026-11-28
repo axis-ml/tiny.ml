@@ -57,6 +57,15 @@ dune exec tiny_ml -- basics       # one: basics training jit control extending
  (preprocess (pps tiny_ml.ppx_tracer)))   ; optional
 ```
 
+## API docs
+
+Online: <https://axis-ml.github.io/tiny.ml/>. Locally:
+
+```sh
+make doc-open     # build with odoc and open in a browser
+make doc-serve    # or serve on http://localhost:8000/tiny_ml/
+```
+
 ## For JAX readers
 
 Code lives in `lib/tracer/`; read the `.mli` files in this order.

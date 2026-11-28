@@ -18,6 +18,8 @@ help:
 	@echo "  ci         lint, build, test"
 	@echo "  watch      rebuild on file changes"
 	@echo "  doc        build the API docs"
+	@echo "  doc-open   build the API docs and open them in a browser"
+	@echo "  doc-serve  build the API docs and serve them on localhost:8000"
 	@echo "  clean      remove _build"
 
 .PHONY: deps
@@ -63,9 +65,22 @@ ci: lint build test
 watch:
 	$(DUNE) build --watch
 
+DOC_HTML := _build/default/_doc/_html
+
 .PHONY: doc
 doc:
 	$(DUNE) build @doc
+	@echo "docs: $(DOC_HTML)/tiny_ml/index.html"
+
+.PHONY: doc-open
+doc-open: doc
+	@xdg-open $(DOC_HTML)/tiny_ml/index.html 2>/dev/null \
+	  || open $(DOC_HTML)/tiny_ml/index.html
+
+.PHONY: doc-serve
+doc-serve: doc
+	@echo "http://localhost:8000/tiny_ml/"
+	python3 -m http.server 8000 --directory $(DOC_HTML)
 
 .PHONY: clean
 clean:

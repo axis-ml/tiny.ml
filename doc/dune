@@ -1,0 +1,5 @@
+; The package's landing page in the API docs: `make doc`, then open
+; _build/default/_doc/_html/tiny_ml/index.html (or `make doc-serve`).
+
+(documentation
+ (package tiny_ml))
